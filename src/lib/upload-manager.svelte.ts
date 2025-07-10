@@ -400,6 +400,9 @@ class FirebaseUploadManager {
 		this.isPaused = false;
 		this.startTime = Date.now();
 
+		// Start periodic health monitoring
+		this._startHealthMonitoring();
+
 		// Process queue with concurrency control (don't await to allow async processing)
 		this._processQueue().catch((error) => {
 			console.error('Error in queue processing:', error);
@@ -850,6 +853,14 @@ class FirebaseUploadManager {
 		// Check if we're done
 		if (this.queue.length === 0 && this.active.size === 0 && !this.memoryManager.getNextBatch()) {
 			console.log('All uploads completed, setting isProcessing to false');
+			console.log(
+				'Final stats - Success:',
+				this.successCount,
+				'Failed:',
+				this.failureCount,
+				'Total processed:',
+				this.successCount + this.failureCount
+			);
 			this.isProcessing = false;
 		} else {
 			// If we still have batches to process, schedule another run
@@ -857,6 +868,18 @@ class FirebaseUploadManager {
 				console.log('Scheduling next batch processing...');
 				setTimeout(() => this._processQueue(), 100);
 			}
+
+			// Log progress every 10 seconds
+			console.log(
+				'Upload progress - Success:',
+				this.successCount,
+				'Failed:',
+				this.failureCount,
+				'Active:',
+				this.active.size,
+				'Queue:',
+				this.queue.length
+			);
 		}
 	}
 
@@ -876,6 +899,7 @@ class FirebaseUploadManager {
 
 		// Item is already added to active in the queue processing
 		console.log('Item already in active uploads. Active count:', this.active.size);
+		console.log('Current active items:', Array.from(this.active.keys()));
 
 		try {
 			// Create Firebase storage reference
@@ -891,9 +915,16 @@ class FirebaseUploadManager {
 			const uploadTask = this._createUploadTaskWrapper(item, firebaseUploadTask);
 			this._uploadTasks.set(item.id, uploadTask);
 
+			// Set a timeout to catch hanging uploads
+			const uploadTimeout = setTimeout(() => {
+				console.error('Upload timeout for item:', item.id, item.file.name);
+				firebaseUploadTask.cancel();
+			}, 300000); // 5 minutes timeout
+
 			// Wait for upload to complete
 			console.log('Waiting for Firebase upload to complete...');
 			await firebaseUploadTask;
+			clearTimeout(uploadTimeout);
 			console.log('Firebase upload completed successfully');
 
 			// Get download URL
@@ -908,6 +939,13 @@ class FirebaseUploadManager {
 			this.successCount++;
 			console.log('Upload success count:', this.successCount);
 
+			// Log progress every 10 files
+			if (this.successCount % 10 === 0) {
+				console.log(
+					`🎉 Progress: ${this.successCount} files uploaded successfully! (${this.failureCount} failed)`
+				);
+			}
+
 			// Emit success event
 			if (this.pluginSystem) {
 				this.pluginSystem.emitEvent('onUploadComplete', item, { downloadURL });
@@ -918,7 +956,10 @@ class FirebaseUploadManager {
 				message: error instanceof Error ? error.message : 'Unknown error',
 				stack: error instanceof Error ? error.stack : undefined,
 				fileSize: item.totalBytes,
-				path: item.path
+				path: item.path,
+				errorType: error?.constructor?.name,
+				errorCode: (error as any)?.code,
+				errorServerResponse: (error as any)?.serverResponse
 			});
 
 			// Handle failure with network manager
@@ -947,9 +988,11 @@ class FirebaseUploadManager {
 				this.pluginSystem.emitEvent('onUploadError', item, error as Error);
 			}
 		} finally {
+			console.log('Removing item from active:', item.id);
 			this.active.delete(item.id);
 			this._uploadTasks.delete(item.id);
 			console.log('Item removed from active uploads. Active count:', this.active.size);
+			console.log('Remaining active items:', Array.from(this.active.keys()));
 			this._processQueue();
 		}
 	}
@@ -1329,6 +1372,39 @@ class FirebaseUploadManager {
 		stats.quickWinsAvailable = stats.sizeDistribution.small;
 
 		return stats;
+	}
+
+	private _startHealthMonitoring(): void {
+		// Monitor upload progress every 30 seconds
+		const healthInterval = setInterval(() => {
+			if (!this.isProcessing) {
+				clearInterval(healthInterval);
+				return;
+			}
+
+			console.log('=== HEALTH CHECK ===');
+			console.log('Active uploads:', this.active.size);
+			console.log('Queue length:', this.queue.length);
+			console.log('Success count:', this.successCount);
+			console.log('Failure count:', this.failureCount);
+			console.log('Total files:', this.totalFiles);
+			console.log('Progress:', this.totalProgress.toFixed(2) + '%');
+			console.log('Active items:', Array.from(this.active.keys()));
+
+			// Check for stuck uploads (uploads that have been active for more than 10 minutes)
+			const now = Date.now();
+			for (const [id, item] of this.active) {
+				const uploadDuration = now - (item.startedAt || now);
+				if (uploadDuration > 600000) {
+					// 10 minutes
+					console.warn('Upload stuck for more than 10 minutes:', id, item.file.name);
+				}
+			}
+			console.log('===================');
+		}, 30000); // Every 30 seconds
+
+		// Store the interval ID for cleanup
+		this._healthCheckInterval = healthInterval;
 	}
 }
 

@@ -12,10 +12,17 @@ export class MemoryManager {
 			batchSize: 100,
 			...config
 		};
+		console.log('[MemoryManager] Initialized with config:', this.config);
 	}
 
 	// Add files in batches to avoid memory spikes
 	async addFilesLazy(files: File[], batchSize = this.config.batchSize): Promise<string[]> {
+		console.log(
+			'[MemoryManager] addFilesLazy called with',
+			files.length,
+			'files, batchSize:',
+			batchSize
+		);
 		const batchIds: string[] = [];
 
 		for (let i = 0; i < files.length; i += batchSize) {
@@ -30,11 +37,17 @@ export class MemoryManager {
 			};
 
 			this.batches.set(batchId, fileBatch);
+			console.log(`[MemoryManager] Created batch ${batchId} with ${batch.length} files`);
 			batchIds.push(batchId);
 
 			// Store in IndexedDB if persistence is enabled
 			if (this.config.persistenceKey) {
-				await this._persistBatch(fileBatch);
+				try {
+					await this._persistBatch(fileBatch);
+					console.log(`[MemoryManager] Persisted batch ${batchId}`);
+				} catch (err) {
+					console.error(`[MemoryManager] Error persisting batch ${batchId}:`, err);
+				}
 			}
 		}
 
@@ -43,8 +56,10 @@ export class MemoryManager {
 
 	// Process a batch and return upload items
 	async processBatch(batchId: string): Promise<UploadItem[]> {
+		console.log(`[MemoryManager] processBatch called for batchId: ${batchId}`);
 		const batch = this.batches.get(batchId);
 		if (!batch || batch.processed) {
+			console.warn(`[MemoryManager] Batch ${batchId} not found or already processed`);
 			return [];
 		}
 
@@ -52,10 +67,12 @@ export class MemoryManager {
 
 		for (const file of batch.files) {
 			const fileId = this._generateFileId(file);
+			const filePath = `uploads/${file.name}`;
+			console.log(`[MemoryManager] Assigning file path: ${filePath} for file:`, file.name);
 			const uploadItem: UploadItem = {
 				id: fileId,
 				file: file,
-				path: `uploads/${file.name}`,
+				path: filePath,
 				metadata: {},
 				priority: 0,
 				status: 'queued',
@@ -71,27 +88,35 @@ export class MemoryManager {
 		}
 
 		batch.processed = true;
+		console.log(
+			`[MemoryManager] Batch ${batchId} processed, returning ${uploadItems.length} upload items`
+		);
 		return uploadItems;
 	}
 
 	// Get next batch to process
 	getNextBatch(): FileBatch | null {
+		console.log('[MemoryManager] getNextBatch called');
 		for (const [batchId, batch] of this.batches) {
 			if (!batch.processed) {
+				console.log(`[MemoryManager] Next batch to process: ${batchId}`);
 				return batch;
 			}
 		}
+		console.log('[MemoryManager] No unprocessed batches found');
 		return null;
 	}
 
 	// Clean up processed batches
 	async cleanupProcessedBatches(): Promise<void> {
+		console.log('[MemoryManager] cleanupProcessedBatches called');
 		const processedBatches = Array.from(this.batches.entries()).filter(
 			([_, batch]) => batch.processed
 		);
 
 		for (const [batchId, _] of processedBatches) {
 			this.batches.delete(batchId);
+			console.log(`[MemoryManager] Deleted processed batch: ${batchId}`);
 
 			// Also remove from IndexedDB if persistence is enabled
 			if (this.db && this.config.persistenceKey) {
@@ -99,8 +124,9 @@ export class MemoryManager {
 					const transaction = this.db.transaction(['fileBatches'], 'readwrite');
 					const store = transaction.objectStore('fileBatches');
 					await store.delete(batchId);
+					console.log(`[MemoryManager] Removed batch ${batchId} from IndexedDB`);
 				} catch (error) {
-					console.warn('Failed to remove batch from IndexedDB:', error);
+					console.warn(`[MemoryManager] Failed to remove batch ${batchId} from IndexedDB:`, error);
 				}
 			}
 		}
@@ -178,11 +204,15 @@ export class MemoryManager {
 
 	// Private methods
 	private _generateBatchId(): string {
-		return `batch_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+		const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+		console.log(`[MemoryManager] Generated batchId: ${batchId}`);
+		return batchId;
 	}
 
 	private _generateFileId(file: File): string {
-		return `${file.name}_${file.size}_${file.lastModified}_${Math.random().toString(36).substring(2, 11)}`;
+		const fileId = `${file.name}_${file.size}_${file.lastModified}_${Math.random().toString(36).substring(2, 11)}`;
+		console.log(`[MemoryManager] Generated fileId: ${fileId} for file:`, file.name);
+		return fileId;
 	}
 
 	private async _openDatabase(): Promise<IDBDatabase> {

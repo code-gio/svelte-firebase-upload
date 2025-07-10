@@ -1,6 +1,10 @@
 import type { ValidationRule, ValidationResult } from '../types.js';
 
 export class FileValidator {
+	constructor() {
+		console.log('[FileValidator] Initialized');
+	}
+
 	private defaultRules: ValidationRule = {
 		maxSize: 100 * 1024 * 1024, // 100MB default
 		allowedTypes: ['*/*'] // Allow all types by default
@@ -8,6 +12,7 @@ export class FileValidator {
 
 	// Validate a single file against rules
 	async validateFile(file: File, rules: Partial<ValidationRule> = {}): Promise<ValidationResult> {
+		console.log(`[FileValidator] Validating file: ${file.name}`);
 		const mergedRules = { ...this.defaultRules, ...rules };
 		const errors: string[] = [];
 		const warnings: string[] = [];
@@ -48,11 +53,19 @@ export class FileValidator {
 		errors.push(...additionalChecks.errors);
 		warnings.push(...additionalChecks.warnings);
 
-		return {
+		const result: ValidationResult = {
 			valid: errors.length === 0,
 			errors,
 			warnings
 		};
+
+		if (!result.valid) {
+			console.warn(`[FileValidator] File failed validation: ${file.name}`);
+			console.warn(`[FileValidator] Errors: ${result.errors.join(', ')}`);
+			console.warn(`[FileValidator] Warnings: ${result.warnings.join(', ')}`);
+		}
+
+		return result;
 	}
 
 	// Validate multiple files
@@ -60,6 +73,7 @@ export class FileValidator {
 		files: File[],
 		rules: Partial<ValidationRule> = {}
 	): Promise<Map<File, ValidationResult>> {
+		console.log(`[FileValidator] Validating ${files.length} files`);
 		const results = new Map<File, ValidationResult>();
 
 		// Validate files in parallel for better performance
@@ -74,6 +88,7 @@ export class FileValidator {
 
 	// Check for duplicate files based on content hash
 	async detectDuplicates(files: File[]): Promise<Map<string, File[]>> {
+		console.log(`[FileValidator] Detecting duplicates for ${files.length} files`);
 		const hashMap = new Map<string, File[]>();
 
 		for (const file of files) {
@@ -97,10 +112,13 @@ export class FileValidator {
 
 	// Calculate file hash for duplicate detection
 	async calculateFileHash(file: File, algorithm: 'SHA-1' | 'SHA-256' = 'SHA-256'): Promise<string> {
+		console.log(`[FileValidator] Calculating hash for file: ${file.name}`);
 		const buffer = await file.arrayBuffer();
 		const hashBuffer = await crypto.subtle.digest(algorithm, buffer);
 		const hashArray = Array.from(new Uint8Array(hashBuffer));
-		return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+		const hash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+		console.log(`[FileValidator] Hash calculated: ${hash}`);
+		return hash;
 	}
 
 	// Get file metadata for validation
@@ -112,6 +130,7 @@ export class FileValidator {
 		dimensions?: { width: number; height: number };
 		duration?: number;
 	}> {
+		console.log(`[FileValidator] Getting metadata for file: ${file.name}`);
 		const hash = await this.calculateFileHash(file);
 		const metadata: any = {
 			size: file.size,
@@ -135,44 +154,65 @@ export class FileValidator {
 				metadata.duration = duration;
 			}
 		}
-
+		console.log(`[FileValidator] Metadata retrieved for file: ${file.name}`);
 		return metadata;
 	}
 
 	// Private methods
 	private isFileTypeAllowed(file: File, allowedTypes: string[]): boolean {
+		console.log(`[FileValidator] Checking if file type '${file.type}' is allowed.`);
 		// Handle wildcard types
-		if (allowedTypes.includes('*/*')) return true;
+		if (allowedTypes.includes('*/*')) {
+			console.log('[FileValidator] File type "*" is allowed.');
+			return true;
+		}
 
 		for (const allowedType of allowedTypes) {
 			// Exact match
-			if (file.type === allowedType) return true;
+			if (file.type === allowedType) {
+				console.log(
+					`[FileValidator] File type '${file.type}' matches allowed type: ${allowedType}`
+				);
+				return true;
+			}
 
 			// Wildcard match (e.g., "image/*" matches "image/jpeg")
 			if (allowedType.endsWith('/*')) {
 				const baseType = allowedType.slice(0, -2);
-				if (file.type.startsWith(baseType + '/')) return true;
+				if (file.type.startsWith(baseType + '/')) {
+					console.log(
+						`[FileValidator] File type '${file.type}' matches allowed type (wildcard): ${allowedType}`
+					);
+					return true;
+				}
 			}
 
 			// Extension match (e.g., ".pdf" matches "application/pdf")
 			if (allowedType.startsWith('.')) {
 				const extension = allowedType.toLowerCase();
-				if (file.name.toLowerCase().endsWith(extension)) return true;
+				if (file.name.toLowerCase().endsWith(extension)) {
+					console.log(
+						`[FileValidator] File type '${file.type}' matches allowed type (extension): ${allowedType}`
+					);
+					return true;
+				}
 			}
 		}
-
+		console.log(`[FileValidator] File type '${file.type}' is NOT allowed.`);
 		return false;
 	}
 
 	private async performAdditionalChecks(
 		file: File
 	): Promise<{ errors: string[]; warnings: string[] }> {
+		console.log(`[FileValidator] Performing additional checks for file: ${file.name}`);
 		const errors: string[] = [];
 		const warnings: string[] = [];
 
 		// Check for empty files
 		if (file.size === 0) {
 			errors.push('File is empty');
+			console.warn(`[FileValidator] File is empty: ${file.name}`);
 		}
 
 		// Check for suspicious file extensions
@@ -180,24 +220,33 @@ export class FileValidator {
 		const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
 		if (suspiciousExtensions.includes(fileExtension)) {
 			warnings.push(`File has potentially dangerous extension: ${fileExtension}`);
+			console.warn(`[FileValidator] File has potentially dangerous extension: ${fileExtension}`);
 		}
 
 		// Check for very large files
 		if (file.size > 1024 * 1024 * 1024) {
 			// 1GB
 			warnings.push('File is very large and may take a long time to upload');
+			console.warn(
+				`[FileValidator] File is very large and may take a long time to upload: ${file.name}`
+			);
 		}
 
 		return { errors, warnings };
 	}
 
 	private async getImageDimensions(file: File): Promise<{ width: number; height: number } | null> {
+		console.log(`[FileValidator] Getting image dimensions for file: ${file.name}`);
 		return new Promise((resolve) => {
 			const img = new Image();
 			img.onload = () => {
+				console.log(
+					`[FileValidator] Image dimensions retrieved for file: ${file.name} (Width: ${img.width}, Height: ${img.height})`
+				);
 				resolve({ width: img.width, height: img.height });
 			};
 			img.onerror = () => {
+				console.warn(`[FileValidator] Failed to get image dimensions for file: ${file.name}`);
 				resolve(null);
 			};
 			img.src = URL.createObjectURL(file);
@@ -205,12 +254,17 @@ export class FileValidator {
 	}
 
 	private async getVideoDuration(file: File): Promise<number | null> {
+		console.log(`[FileValidator] Getting video duration for file: ${file.name}`);
 		return new Promise((resolve) => {
 			const video = document.createElement('video');
 			video.onloadedmetadata = () => {
+				console.log(
+					`[FileValidator] Video duration retrieved for file: ${file.name} (Duration: ${video.duration})`
+				);
 				resolve(video.duration);
 			};
 			video.onerror = () => {
+				console.warn(`[FileValidator] Failed to get video duration for file: ${file.name}`);
 				resolve(null);
 			};
 			video.src = URL.createObjectURL(file);
@@ -218,10 +272,13 @@ export class FileValidator {
 	}
 
 	private formatBytes(bytes: number): string {
+		console.log(`[FileValidator] Formatting bytes: ${bytes}`);
 		if (bytes === 0) return '0 Bytes';
 		const k = 1024;
 		const sizes = ['Bytes', 'KB', 'MB', 'GB'];
 		const i = Math.floor(Math.log(bytes) / Math.log(k));
-		return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+		const formattedBytes = parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+		console.log(`[FileValidator] Formatted bytes: ${formattedBytes}`);
+		return formattedBytes;
 	}
 }

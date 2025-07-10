@@ -44,7 +44,7 @@
 		if (storage && !uploadManager) {
 			uploadManager = new FirebaseUploadManager({
 				autoStart: autoStart,
-				maxConcurrentUploads: 3,
+				maxConcurrentUploads: 1,
 				chunkSize: 1024 * 1024 * 5, // 5MB chunks
 				retryAttempts: 3,
 				enableHealthChecks: true,
@@ -306,6 +306,7 @@
 				{@const stats = getUploadStats()}
 				{#if stats}
 					<div class="upload-stats">
+						<span>Files: {stats.successCount} completed, {stats.failureCount} failed</span>
 						<span>Speed: {Math.round(stats.currentSpeed / 1024)} KB/s</span>
 						{#if stats.estimatedTimeRemaining}
 							<span>ETA: {Math.round(stats.estimatedTimeRemaining)}s</span>
