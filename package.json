@@ -1,6 +1,7 @@
 {
 	"name": "svelte-firebase-upload",
 	"version": "0.0.1",
+	"license": "MIT",
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build && npm run prepack",
@@ -12,6 +13,18 @@
 		"format": "prettier --write .",
 		"lint": "prettier --check ."
 	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/code-gio/svelte-firebase-upload.git"
+	},
+	"description": "A Svelte component for uploading files to Firebase Storage",
+	"keywords": [
+		"svelte",
+		"firebase",
+		"upload",
+		"storage"
+	],
+	"author": "Giovani Rodriguez",
 	"files": [
 		"dist",
 		"!dist/**/*.test.*",
@@ -30,6 +43,7 @@
 		}
 	},
 	"peerDependencies": {
+		"firebase": "^11.10.0",
 		"svelte": "^5.0.0"
 	},
 	"devDependencies": {
@@ -45,9 +59,6 @@
 		"typescript": "^5.0.0",
 		"vite": "^7.0.4"
 	},
-	"keywords": [
-		"svelte"
-	],
 	"dependencies": {
 		"firebase": "^11.10.0"
 	}

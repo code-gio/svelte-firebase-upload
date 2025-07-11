@@ -1,58 +1,110 @@
-# Svelte library
+# Svelte Firebase Upload Manager
 
-Everything you need to build a Svelte library, powered by [`sv`](https://npmjs.com/package/sv).
+A robust, feature-rich file upload component for Svelte applications integrated with Firebase Storage. Supports drag-and-drop, progress tracking, resumable uploads, validation, health checks, and more.
 
-Read more about creating a library [in the docs](https://svelte.dev/docs/kit/packaging).
+## Features
 
-## Creating a project
+- **Drag & Drop Interface**: Intuitive file selection with visual feedback.
+- **Concurrent Uploads**: Upload multiple files simultaneously with configurable limits.
+- **Progress Tracking**: Real-time progress bars, speed, and ETA estimates.
+- **Resumable Uploads**: Automatic retry and resumption for interrupted uploads.
+- **File Validation**: Size, type, and custom validation rules.
+- **Smart Scheduling**: Prioritizes smaller files for quicker wins.
+- **Health Monitoring**: Periodic checks for network, storage, and permissions.
+- **Bandwidth Management**: Adaptive throttling to prevent overload.
+- **Plugin System**: Extensible with custom plugins for additional functionality.
+- **Memory Optimization**: Handles large batches (>100 files) efficiently.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Installation
 
-```bash
-# create a new project in the current directory
-npx sv create
-
-# create a new project in my-app
-npx sv create my-app
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```bash
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-Everything inside `src/lib` is part of your library, everything inside `src/routes` can be used as a showcase or preview app.
-
-## Building
-
-To build your library:
+Install the package and its dependencies via npm:
 
 ```bash
-npm run package
+npm i svelte-firebase-upload firebase
 ```
 
-To create a production version of your showcase app:
+This installs the core upload manager and Firebase SDK.
 
-```bash
-npm run build
+## Usage
+
+### 1. Initialize Firebase
+
+Create a Firebase project and get your config from the Firebase console. In your Svelte component (e.g., `+page.svelte`):
+
+```svelte
+<script lang="ts">
+  import { initializeApp } from 'firebase/app';
+  import { getStorage } from 'firebase/storage';
+  import DragAndDrop from 'svelte-firebase-upload/drag-and-drop.svelte'; // Adjust path if needed
+
+  const firebaseConfig = {
+    // Your Firebase config here
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  let storage;
+
+  $effect(() => {
+    const app = initializeApp(firebaseConfig);
+    storage = getStorage(app);
+  });
+</script>
+
+<DragAndDrop
+  {storage}
+  uploadPath="uploads/"
+  autoStart={true}
+  maxFileSize={50 * 1024 * 1024} // 50MB
+  allowedFileTypes={['.jpg', '.png', '.pdf']} // Customize as needed
+/>
 ```
 
-You can preview the production build with `npm run preview`.
+### 2. Basic Example
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Drop the `<DragAndDrop>` component into your page. It handles file drops, uploads to Firebase Storage, and displays progress/lists.
 
-## Publishing
+For advanced usage, access the underlying `FirebaseUploadManager` instance for custom control (e.g., pause/resume).
 
-Go into the `package.json` and give your package the desired name through the `"name"` option. Also consider adding a `"license"` field and point it to a `LICENSE` file which you can create from a template (one popular option is the [MIT license](https://opensource.org/license/mit/)).
+### Configuration Options
 
-To publish your library to [npm](https://www.npmjs.com):
+Props for `<DragAndDrop>`:
 
-```bash
-npm publish
-```
+- `storage`: Firebase Storage instance (required).
+- `uploadPath`: Base path in Storage (default: 'uploads/').
+- `autoStart`: Start uploads automatically (default: true).
+- `maxFileSize`: Max file size in bytes (default: 50MB).
+- `allowedFileTypes`: Array of extensions/mimes (default: images).
+- `showFileTypeError`: Show errors for invalid types (default: true).
+
+Manager config (passed internally, customizable via extension):
+
+- `maxConcurrentUploads`: Default 4.
+- `chunkSize`: Default 1MB.
+- `retryAttempts`: Default 3.
+- `enableSmartScheduling`: Default true.
+- `maxBandwidthMbps`: Default 10.
+- And more (see source for full options).
+
+## Dependencies
+
+- Svelte 5+ (for reactivity with `$state`, etc.).
+- Firebase SDK 9+.
+
+## Development
+
+- Clone the repo: `git clone [repo-url]`
+- Install: `npm install`
+- Run dev: `npm run dev`
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
+## Contributing
+
+Pull requests welcome! For major changes, open an issue first.
