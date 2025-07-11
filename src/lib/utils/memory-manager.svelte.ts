@@ -5,6 +5,8 @@ export class MemoryManager {
 	private pendingFiles: File[] = [];
 	private batches: Map<string, FileBatch> = new Map();
 	private db: IDBDatabase | null = null;
+	private pendingTotalFiles: number = 0;
+	private pendingTotalSize: number = 0;
 
 	constructor(config: Partial<VirtualQueueConfig> = {}) {
 		this.config = {
@@ -24,6 +26,8 @@ export class MemoryManager {
 			batchSize
 		);
 		const batchIds: string[] = [];
+		this.pendingTotalFiles += files.length;
+		this.pendingTotalSize += files.reduce((sum, file) => sum + file.size, 0);
 
 		for (let i = 0; i < files.length; i += batchSize) {
 			const batch = files.slice(i, i + batchSize);
@@ -88,6 +92,11 @@ export class MemoryManager {
 		}
 
 		batch.processed = true;
+
+		// Subtract from pending totals when loading
+		this.pendingTotalFiles -= batch.files.length;
+		this.pendingTotalSize -= batch.files.reduce((sum, file) => sum + file.size, 0);
+
 		console.log(
 			`[MemoryManager] Batch ${batchId} processed, returning ${uploadItems.length} upload items`
 		);
@@ -159,6 +168,15 @@ export class MemoryManager {
 			pendingFiles: this.pendingFiles.length,
 			totalSize
 		};
+	}
+
+	// Get pending totals
+	getPendingTotalFiles(): number {
+		return this.pendingTotalFiles;
+	}
+
+	getPendingTotalSize(): number {
+		return this.pendingTotalSize;
 	}
 
 	// IndexedDB Persistence

@@ -70,6 +70,8 @@ class FirebaseUploadManager {
 	private fileValidator: FileValidator;
 	private uploadResumer: UploadResumer;
 
+	private _lastBandwidthUpdate: number = Date.now();
+	private _pausedByHealth: boolean = false;
 	// Plugin system
 	public pluginSystem: PluginSystem;
 
@@ -323,6 +325,10 @@ class FirebaseUploadManager {
 		if (files.length > 100) {
 			const batchIds = await this.memoryManager.addFilesLazy(files);
 			console.log(`Added ${files.length} files in ${batchIds.length} batches`);
+
+			// Include pending totals in overall totals
+			this.totalFiles += this.memoryManager.getPendingTotalFiles();
+			this.totalSize += this.memoryManager.getPendingTotalSize();
 
 			// Check autoStart even for large file sets
 			console.log('Checking autoStart for large file set...');
@@ -880,6 +886,25 @@ class FirebaseUploadManager {
 				'Queue:',
 				this.queue.length
 			);
+
+			// Add detailed progress logging
+			if (this.successCount > 0) {
+				const avgSpeedMBps = (this.currentSpeed / (1024 * 1024)).toFixed(2);
+				const remainingFiles = this.totalFiles - this.successCount - this.failureCount;
+				const avgTimePerFile =
+					this.successCount > 0
+						? (Date.now() - (this.startTime || Date.now())) / this.successCount
+						: 0;
+				const estimatedTimeRemaining = remainingFiles * avgTimePerFile;
+
+				console.log(`📊 Progress Details:`);
+				console.log(`   Speed: ${avgSpeedMBps} MB/s`);
+				console.log(`   Remaining files: ${remainingFiles}`);
+				console.log(`   Avg time per file: ${(avgTimePerFile / 1000).toFixed(1)}s`);
+				console.log(
+					`   Estimated time remaining: ${(estimatedTimeRemaining / 1000 / 60).toFixed(1)} minutes`
+				);
+			}
 		}
 	}
 
@@ -887,6 +912,9 @@ class FirebaseUploadManager {
 		console.log('_startUpload called for:', item.id, item.file.name);
 		console.log('Storage available:', !!this.storage);
 		console.log('File size:', item.totalBytes, 'bytes');
+		console.log('File size in MB:', (item.totalBytes / (1024 * 1024)).toFixed(2), 'MB');
+		console.log('Chunk size:', this.config.chunkSize, 'bytes');
+		console.log('Max concurrent uploads:', this.config.maxConcurrentUploads);
 
 		if (!this.storage) {
 			const error = 'Firebase storage not initialized. Call setStorage() first.';
@@ -895,7 +923,7 @@ class FirebaseUploadManager {
 		}
 
 		// Check bandwidth limits before starting
-		await this.bandwidthManager.throttleUpload(item.totalBytes);
+		// await this.bandwidthManager.throttleUpload(item.totalBytes); // Temporarily disabled for testing
 
 		// Item is already added to active in the queue processing
 		console.log('Item already in active uploads. Active count:', this.active.size);
@@ -915,11 +943,19 @@ class FirebaseUploadManager {
 			const uploadTask = this._createUploadTaskWrapper(item, firebaseUploadTask);
 			this._uploadTasks.set(item.id, uploadTask);
 
-			// Set a timeout to catch hanging uploads
+			// Set a timeout to catch hanging uploads - longer timeout for large files
+			const timeoutMs = item.totalBytes > 10 * 1024 * 1024 ? 900000 : 300000; // 15 min for >10MB, 5 min for smaller
 			const uploadTimeout = setTimeout(() => {
-				console.error('Upload timeout for item:', item.id, item.file.name);
+				console.error(
+					'Upload timeout for item:',
+					item.id,
+					item.file.name,
+					'after',
+					timeoutMs / 1000,
+					'seconds'
+				);
 				firebaseUploadTask.cancel();
-			}, 300000); // 5 minutes timeout
+			}, timeoutMs);
 
 			// Wait for upload to complete
 			console.log('Waiting for Firebase upload to complete...');
@@ -1046,7 +1082,10 @@ class FirebaseUploadManager {
 
 			// Update bandwidth usage
 			if (progressDiff > 0) {
-				this.bandwidthManager.updateBandwidthUsage(progressDiff, 100); // Assuming 100ms intervals
+				const now = Date.now();
+				const timeDiff = now - this._lastBandwidthUpdate;
+				this.bandwidthManager.updateBandwidthUsage(progressDiff, timeDiff);
+				this._lastBandwidthUpdate = now;
 			}
 
 			// Calculate speed
@@ -1245,15 +1284,22 @@ class FirebaseUploadManager {
 					if (!healthResult.status.healthy && this.isProcessing) {
 						const criticalIssues = healthResult.status.issues.filter(
 							(issue) =>
-								issue.includes('Connection failed') ||
-								issue.includes('Storage quota nearly full') ||
-								issue.includes('Network quality is poor')
+								issue.includes('Connection failed') || issue.includes('Storage quota nearly full')
+							// Removed: || issue.includes('Network quality is poor')
 						);
 
 						if (criticalIssues.length > 0) {
 							console.warn('Critical health issues detected, pausing uploads:', criticalIssues);
+							this._pausedByHealth = true;
 							this.pause();
 						}
+					}
+
+					// Auto-resume if health improved and was paused by health issues
+					if (healthResult.status.healthy && this._pausedByHealth && this.isPaused) {
+						console.log('Health improved, resuming uploads');
+						this._pausedByHealth = false;
+						await this.resume();
 					}
 
 					this._lastHealthCheck = healthResult;

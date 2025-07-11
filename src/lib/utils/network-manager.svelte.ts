@@ -99,9 +99,11 @@ export class NetworkManager implements NetworkMonitor {
 
 		const { effectiveType, downlink } = this.connection;
 
-		if (effectiveType === '4g' && downlink && downlink > 10) {
+		if (effectiveType === '4g' && downlink && downlink > 8) {
+			// Lowered from 10
 			return 'excellent';
-		} else if (effectiveType === '4g' || (downlink && downlink > 5)) {
+		} else if (effectiveType === '4g' || (downlink && downlink > 3)) {
+			// Lowered from 5
 			return 'good';
 		} else {
 			return 'poor';

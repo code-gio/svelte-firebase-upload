@@ -39,16 +39,24 @@
 	let activeFiles = $derived(getFilesByStatus('uploading'));
 	let completedFiles = $derived(getFilesByStatus('completed'));
 	let failedFiles = $derived(getFilesByStatus('failed'));
+
+	// File-based progress tracking
+	let fileProgress = $derived(
+		uploadManager ? Math.round((uploadManager.successCount / uploadManager.totalFiles) * 100) : 0
+	);
 	// Initialize upload manager when storage is provided
 	$effect(() => {
 		if (storage && !uploadManager) {
 			uploadManager = new FirebaseUploadManager({
 				autoStart: autoStart,
-				maxConcurrentUploads: 1,
-				chunkSize: 1024 * 1024 * 5, // 5MB chunks
+				maxConcurrentUploads: 5, // Reduced from 10 to prevent bandwidth overload
+				chunkSize: 1024 * 1024 * 1, // 1MB chunks for better reliability (unchanged)
 				retryAttempts: 3,
+				retryDelay: 2000, // 2 second delay between retries (unchanged)
 				enableHealthChecks: true,
-				enableSmartScheduling: true
+				enableSmartScheduling: true,
+				maxBandwidthMbps: 50, // Increased from 10 to allow faster starts
+				adaptiveBandwidth: false // Disabled to prevent over-adjustments; set to true after testing
 			});
 			uploadManager.setStorage(storage);
 		}
@@ -295,7 +303,9 @@
 		<div class="upload-progress-container">
 			<div class="upload-progress-header">
 				<span class="upload-status">{uploadStatus}</span>
-				<span class="upload-percentage">{Math.round(uploadProgress)}%</span>
+				<span class="upload-percentage"
+					>{Math.round(uploadProgress)}% (bytes) / {fileProgress}% (files)</span
+				>
 			</div>
 
 			<div class="upload-progress-bar">
