@@ -9,7 +9,7 @@
 		uploadPath = 'uploads/',
 		autoStart = true,
 		maxFileSize = 50 * 1024 * 1024, // 50MB default
-		allowedFileTypes = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'],
+		allowedFileTypes = [],
 		showFileTypeError = true
 	} = $props<{
 		storage?: any;
@@ -167,15 +167,17 @@
 				};
 			}
 
-			// Check file type
-			const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
-			if (!allowedFileTypes.includes(fileExtension)) {
-				if (showFileTypeError) {
-					const allowedTypes = allowedFileTypes.join(', ');
-					return {
-						valid: false,
-						error: `File "${file.name}" is not allowed. Allowed types: ${allowedTypes}`
-					};
+			// Check file type only if allowedFileTypes is not empty
+			if (allowedFileTypes.length > 0) {
+				const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
+				if (!allowedFileTypes.includes(fileExtension)) {
+					if (showFileTypeError) {
+						const allowedTypes = allowedFileTypes.join(', ');
+						return {
+							valid: false,
+							error: `File "${file.name}" is not allowed. Allowed types: ${allowedTypes}`
+						};
+					}
 				}
 			}
 		}
@@ -283,7 +285,9 @@
 				<span class="upload-browse-text">browse</span>
 			</div>
 
-			<div class="upload-formats">{allowedFileTypes.join(', ').toUpperCase()}</div>
+			<div class="upload-formats">
+				{allowedFileTypes.length > 0 ? allowedFileTypes.join(', ').toUpperCase() : 'ALL FILE TYPES'}
+			</div>
 		</div>
 	</div>
 
@@ -294,7 +298,7 @@
 		type="file"
 		class="sr-only"
 		multiple
-		accept={allowedFileTypes.join(',')}
+		accept={allowedFileTypes.length > 0 ? allowedFileTypes.join(',') : undefined}
 		onchange={handleFileSelect}
 	/>
 
