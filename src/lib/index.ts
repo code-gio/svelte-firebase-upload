@@ -6,6 +6,9 @@ export { default as FirebaseUploadManager } from './upload-manager.svelte.js';
 // Drag and drop component
 export { default as DragAndDrop } from './components/drag-and-drop.svelte';
 
+// Upload panel component
+export { default as UploadPanel } from './components/upload-panel.svelte';
+
 // Types
 export type {
 	UploadManagerConfig,
