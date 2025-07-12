@@ -1105,7 +1105,6 @@ class FirebaseUploadManager {
 				try {
 					const storageRef = ref(this.storage!, item.path);
 					await deleteObject(storageRef);
-					console.log('Cleaned up file from storage:', item.id);
 				} catch (error) {
 					console.warn('Failed to clean up file from storage:', item.id, error);
 				}

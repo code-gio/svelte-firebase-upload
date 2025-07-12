@@ -128,23 +128,13 @@
 		}
 
 		try {
-			console.log('Adding files to upload manager:', newFiles.length, 'files');
-			console.log('Upload manager config:', uploadManager.config);
-			console.log('Upload manager storage:', uploadManager.storage);
-
 			// Add files to the upload manager
 			const addedCount = await uploadManager.addFiles(newFiles, {
 				path: uploadPath
 			});
 
-			console.log('Files added successfully:', addedCount);
-			console.log('Queue length after adding:', uploadManager.queue.length);
-			console.log('Is processing:', uploadManager.isProcessing);
-			console.log('Auto start enabled:', uploadManager.config.autoStart);
-
 			// Update local files state
 			files = [...files, ...newFiles];
-			console.log('Files added to upload queue:', newFiles);
 
 			// Clear file input
 			if (fileInput) {

@@ -12,7 +12,6 @@ export class NetworkManager implements NetworkMonitor {
 	private retryConfig: RetryConfig;
 
 	constructor(retryConfig: Partial<RetryConfig> = {}) {
-		console.log('[NetworkManager] Initialized with config:', retryConfig);
 		this.retryConfig = {
 			maxAttempts: 3,
 			baseDelay: 1000,
@@ -27,12 +26,10 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Network event listeners
 	onOnline(callback: () => void): void {
-		console.log('[NetworkManager] onOnline callback registered');
 		this.onlineCallbacks.push(callback);
 	}
 
 	onOffline(callback: () => void): void {
-		console.log('[NetworkManager] onOffline callback registered');
 		this.offlineCallbacks.push(callback);
 	}
 
@@ -50,7 +47,6 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Smart retry logic with exponential backoff and jitter
 	calculateRetryDelay(attempts: number): number {
-		console.log(`[NetworkManager] calculateRetryDelay called for attempt ${attempts}`);
 		const { baseDelay, maxDelay, backoffMultiplier, jitter } = this.retryConfig;
 
 		// Exponential backoff
@@ -65,7 +61,6 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Check if we should retry based on network conditions
 	shouldRetry(attempts: number, error?: Error): boolean {
-		console.log(`[NetworkManager] shouldRetry called for attempt ${attempts} with error:`, error);
 		if (attempts >= this.retryConfig.maxAttempts) {
 			return false;
 		}
@@ -94,7 +89,6 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Get current network quality
 	getNetworkQuality(): 'excellent' | 'good' | 'poor' | 'unknown' {
-		console.log('[NetworkManager] getNetworkQuality called');
 		if (!this.connection) return 'unknown';
 
 		const { effectiveType, downlink } = this.connection;

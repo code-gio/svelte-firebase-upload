@@ -93,12 +93,10 @@ export class PluginSystem {
 	constructor(manager: any) {
 		this.manager = manager;
 		this.initializeEventListeners();
-		console.log('[PluginSystem] Initialized');
 	}
 
 	// Register a plugin
 	async registerPlugin(plugin: UploadPlugin, config: Partial<PluginConfig> = {}): Promise<void> {
-		console.log('[PluginSystem] registerPlugin called:', plugin?.name || plugin);
 		const pluginConfig: PluginConfig = {
 			enabled: true,
 			priority: 0,
@@ -131,13 +129,10 @@ export class PluginSystem {
 				console.error(`Failed to initialize plugin '${plugin.name}':`, error);
 			}
 		}
-
-		console.log('[PluginSystem] Plugin registered:', plugin?.name || plugin);
 	}
 
 	// Unregister a plugin
 	async unregisterPlugin(pluginName: string): Promise<void> {
-		console.log('[PluginSystem] unregisterPlugin called:', pluginName);
 		const entry = this.plugins.get(pluginName);
 		if (!entry) {
 			throw new Error(`Plugin '${pluginName}' is not registered`);
@@ -159,13 +154,10 @@ export class PluginSystem {
 
 		// Remove from registry
 		this.plugins.delete(pluginName);
-
-		console.log('[PluginSystem] Plugin unregistered:', pluginName);
 	}
 
 	// Enable/disable a plugin
 	async setPluginEnabled(pluginName: string, enabled: boolean): Promise<void> {
-		console.log('[PluginSystem] setPluginEnabled called:', pluginName, enabled);
 		const entry = this.plugins.get(pluginName);
 		if (!entry) {
 			throw new Error(`Plugin '${pluginName}' is not registered`);
@@ -184,46 +176,32 @@ export class PluginSystem {
 
 	// Get plugin by name
 	getPlugin(pluginName: string): UploadPlugin | null {
-		console.log('[PluginSystem] getPlugin called:', pluginName);
 		const entry = this.plugins.get(pluginName);
-		console.log('[PluginSystem] getPlugin result:', entry ? entry.plugin : null);
 		return entry ? entry.plugin : null;
 	}
 
 	// Get all registered plugins
 	getAllPlugins(): Array<{ name: string; plugin: UploadPlugin; config: PluginConfig }> {
-		console.log('[PluginSystem] getAllPlugins called');
 		const result = Array.from(this.plugins.entries()).map(([name, entry]) => ({
 			name,
 			plugin: entry.plugin,
 			config: entry.config
 		}));
-		console.log('[PluginSystem] getAllPlugins result:', result);
 		return result;
 	}
 
 	// Get enabled plugins
 	getEnabledPlugins(): Array<{ name: string; plugin: UploadPlugin; config: PluginConfig }> {
-		console.log('[PluginSystem] getEnabledPlugins called');
 		const result = this.getAllPlugins().filter(({ config }) => config.enabled);
-		console.log('[PluginSystem] getEnabledPlugins result:', result);
 		return result;
 	}
 
 	// Call a plugin method
 	async callPluginMethod(plugin: UploadPlugin, methodName: string, args: any[]): Promise<any> {
-		console.log('[PluginSystem] callPluginMethod called:', plugin.name, methodName, args);
 		const method = plugin[methodName];
 		if (typeof method === 'function') {
 			try {
 				const result = await method.apply(plugin, args);
-				console.log(
-					'[PluginSystem] callPluginMethod success:',
-					plugin.name,
-					methodName,
-					args,
-					result
-				);
 				return result;
 			} catch (error) {
 				console.error(
@@ -243,13 +221,11 @@ export class PluginSystem {
 				throw error;
 			}
 		}
-		console.log('[PluginSystem] callPluginMethod no method found:', plugin.name, methodName);
 		return undefined;
 	}
 
 	// Emit an event to all plugins
 	async emitEvent(eventType: PluginEventType, ...args: any[]): Promise<void> {
-		console.log('[PluginSystem] emitEvent called:', eventType, args);
 		const listeners = this.eventListeners.get(eventType) || [];
 
 		// Sort by priority (higher priority first)
@@ -281,7 +257,6 @@ export class PluginSystem {
 				}
 			}
 		}
-		console.log('[PluginSystem] emitEvent finished:', eventType, args);
 	}
 
 	// Execute a pipeline of plugins (for hooks that can modify data)
@@ -290,7 +265,6 @@ export class PluginSystem {
 		initialValue: T,
 		...args: any[]
 	): Promise<T> {
-		console.log('[PluginSystem] executePipeline called:', eventType, initialValue, args);
 		const listeners = this.eventListeners.get(eventType) || [];
 
 		// Sort by priority (higher priority first)
@@ -329,7 +303,6 @@ export class PluginSystem {
 				}
 			}
 		}
-		console.log('[PluginSystem] executePipeline finished:', eventType, initialValue, args, result);
 		return result;
 	}
 

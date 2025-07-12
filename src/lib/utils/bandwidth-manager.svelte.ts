@@ -9,7 +9,6 @@ export class BandwidthManager {
 	private bandwidthHistory: number[] = [];
 
 	constructor(config: Partial<BandwidthConfig> = {}) {
-		console.log('[BandwidthManager] Initialized with config:', config);
 		this.config = {
 			maxBandwidthMbps: 10, // 10 Mbps default
 			adaptiveBandwidth: true,
@@ -26,7 +25,6 @@ export class BandwidthManager {
 
 	// Throttle upload based on bandwidth limits
 	async throttleUpload(bytesToUpload: number): Promise<void> {
-		console.log(`[BandwidthManager] throttleUpload called for ${bytesToUpload} bytes`);
 		if (!this.isThrottling) {
 			this.isThrottling = true;
 			this._startThrottling();
@@ -42,9 +40,6 @@ export class BandwidthManager {
 
 	// Update bandwidth usage
 	updateBandwidthUsage(bytesUploaded: number, timeMs: number): void {
-		console.log(
-			`[BandwidthManager] updateBandwidthUsage called: ${bytesUploaded} bytes over ${timeMs}ms`
-		);
 		const bytesPerSecond = (bytesUploaded / timeMs) * 1000;
 		this.currentBandwidth = bytesPerSecond;
 
@@ -134,7 +129,6 @@ export class BandwidthManager {
 		limit: number;
 		utilization: number;
 	} {
-		console.log('[BandwidthManager] getBandwidthStats called');
 		const maxBytesPerSecond = (this.config.maxBandwidthMbps * 1024 * 1024) / 8;
 		const peak = Math.max(...this.bandwidthHistory, 0);
 		const utilization =

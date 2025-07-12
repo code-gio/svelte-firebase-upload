@@ -364,7 +364,5 @@ export class QueueOptimizationPlugin implements UploadPlugin {
 			totalSize: queue.reduce((sum, item) => sum + item.totalBytes, 0),
 			averagePriority: queue.reduce((sum, item) => sum + item.priority, 0) / queue.length
 		};
-
-		console.log('Queue processed:', stats);
 	}
 }
