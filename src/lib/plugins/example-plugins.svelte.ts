@@ -36,8 +36,7 @@
  * - onError: Error handling
  */
 
-import type { UploadPlugin, PluginConfig } from '../utils/plugin-system.svelte.js';
-import type { UploadItem, UploadStatus, ValidationResult, UploadManagerInterface } from '../types.js';
+import type { UploadPlugin, PluginConfig, UploadItem, UploadStatus, ValidationResult, UploadManagerInterface } from '../types.js';
 
 /**
  * Example: Logging Plugin

@@ -1,13 +1,5 @@
-// Main exports for the Firebase Upload Manager library
-
 // Core upload manager
 export { default as FirebaseUploadManager } from './upload-manager.svelte.js';
-
-// Drag and drop component
-export { default as DragAndDrop } from './components/drag-and-drop.svelte';
-
-// Upload panel component
-export { default as UploadPanel } from './components/upload-panel.svelte';
 
 // Types
 export type {
@@ -24,7 +16,12 @@ export type {
 	HealthStatus,
 	HealthCheckResult,
 	StorageQuota,
-	PermissionStatus
+	PermissionStatus,
+	UploadPlugin,
+	PluginConfig,
+	UploadManagerInterface,
+	ChunkState,
+	ResumeOptions
 } from './types.js';
 
 // Utility managers

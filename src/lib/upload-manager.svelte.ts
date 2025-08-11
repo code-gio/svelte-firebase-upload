@@ -13,7 +13,9 @@ import type {
 	HealthCheckResult,
 	StorageQuota,
 	PermissionStatus,
-	UploadManagerInterface
+	UploadManagerInterface,
+	UploadPlugin,
+	PluginConfig
 } from './types.js';
 
 // Firebase imports
@@ -28,7 +30,7 @@ import { NetworkManager } from './utils/network-manager.svelte.js';
 import { BandwidthManager } from './utils/bandwidth-manager.svelte.js';
 import { FileValidator } from './utils/file-validator.svelte.js';
 import { UploadResumer } from './utils/upload-resumer.svelte.js';
-import { PluginSystem, type UploadPlugin, type PluginConfig } from './utils/plugin-system.svelte.js';
+import { PluginSystem } from './utils/plugin-system.svelte.js';
 import { ConfigValidator } from './utils/config-validator.svelte.js';
 
 /**

@@ -1,27 +1,4 @@
-export interface ResumableUploadState {
-	fileId: string;
-	fileName: string;
-	fileSize: number;
-	uploadedBytes: number;
-	chunks: ChunkState[];
-	metadata: Record<string, any>;
-	createdAt: number;
-	lastUpdated: number;
-}
-
-export interface ChunkState {
-	index: number;
-	start: number;
-	end: number;
-	uploaded: boolean;
-	hash?: string;
-}
-
-export interface ResumeOptions {
-	chunkSize?: number;
-	verifyChunks?: boolean;
-	parallelChunks?: number;
-}
+import type { ResumableUploadState, ChunkState, ResumeOptions } from '../types.js';
 
 export class UploadResumer {
 	private _storageKey = 'upload-resume-state';

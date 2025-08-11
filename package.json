@@ -15,14 +15,20 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/code-gio/svelte-firebase-upload.git"
+		"url": "git+https://github.com/code-gio/svelte-firebase-upload.git"
 	},
-	"description": "A Svelte component for uploading files to Firebase Storage",
+	"description": "Enterprise-grade file upload manager for Svelte with Firebase Storage integration, featuring concurrent uploads, resumable transfers, validation, health monitoring, and plugin system",
 	"keywords": [
 		"svelte",
 		"firebase",
 		"upload",
-		"storage"
+		"storage",
+		"file-upload",
+		"concurrent-upload",
+		"resumable-upload",
+		"plugin-system",
+		"typescript",
+		"svelte5"
 	],
 	"author": "Giovani Rodriguez",
 	"files": [

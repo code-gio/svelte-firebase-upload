@@ -1,68 +1,12 @@
-import type { UploadItem, UploadStatus, ValidationResult, UploadManagerInterface } from '../types.js';
-
-// Plugin lifecycle hooks
-export interface UploadPlugin {
-	// Plugin metadata
-	name: string;
-	version: string;
-	description?: string;
-
-	// Lifecycle hooks
-	onInitialize?: (manager: any) => Promise<void> | void;
-	onDestroy?: () => Promise<void> | void;
-
-	// File processing hooks
-	beforeFileAdd?: (
-		file: File,
-		options: any
-	) => Promise<{ file: File; options: any }> | { file: File; options: any };
-	afterFileAdd?: (item: UploadItem) => Promise<void> | void;
-
-	// Validation hooks
-	beforeValidation?: (
-		file: File,
-		rules: any
-	) => Promise<{ file: File; rules: any }> | { file: File; rules: any };
-	afterValidation?: (file: File, result: ValidationResult) => Promise<void> | void;
-
-	// Upload lifecycle hooks
-	beforeUpload?: (item: UploadItem) => Promise<UploadItem> | UploadItem;
-	onUploadStart?: (item: UploadItem) => Promise<void> | void;
-	onUploadProgress?: (item: UploadItem, progress: number) => Promise<void> | void;
-	onUploadComplete?: (item: UploadItem, result: any) => Promise<void> | void;
-	onUploadError?: (item: UploadItem, error: Error) => Promise<void> | void;
-
-	// Queue management hooks
-	beforeQueueProcess?: (queue: UploadItem[]) => Promise<UploadItem[]> | UploadItem[];
-	afterQueueProcess?: (queue: UploadItem[]) => Promise<void> | void;
-
-	// State change hooks
-	onStatusChange?: (
-		item: UploadItem,
-		oldStatus: UploadStatus,
-		newStatus: UploadStatus
-	) => Promise<void> | void;
-	onManagerStateChange?: (state: any) => Promise<void> | void;
-
-	// Error handling hooks
-	onError?: (error: Error, context: any) => Promise<void> | void;
-
-	// Custom methods that can be called by other plugins or the manager
-	[key: string]: any;
-}
-
-// Plugin configuration
-export interface PluginConfig {
-	enabled: boolean;
-	priority: number; // Higher priority plugins run first
-	options?: Record<string, any>;
-}
-
-// Plugin registry entry
-export interface PluginRegistryEntry {
-	plugin: UploadPlugin;
-	config: PluginConfig;
-}
+import type { 
+	UploadItem, 
+	UploadStatus, 
+	ValidationResult, 
+	UploadManagerInterface,
+	UploadPlugin,
+	PluginConfig,
+	PluginRegistryEntry
+} from '../types.js';
 
 // Plugin event types
 export type PluginEventType =
