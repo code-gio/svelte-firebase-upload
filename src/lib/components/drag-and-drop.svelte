@@ -1,38 +1,41 @@
 <script lang="ts">
 	import FirebaseUploadManager from '../upload-manager.svelte.js';
-	import type { UploadItem, UploadStatus } from '../types.js';
+	import type { UploadItem, UploadStatus, FirebaseStorage } from '../types.js';
 	import { onDestroy } from 'svelte';
 	import FilesIcon from './files-icon.svelte';
-	// Props
+	
+	// Props with proper typing
 	let {
 		storage = null,
 		uploadPath = 'uploads/',
 		autoStart = true,
 		maxFileSize = 50 * 1024 * 1024, // 50MB default
 		allowedFileTypes = [],
-		showFileTypeError = true
+		showFileTypeError = true,
+		ariaLabel = 'File upload area'
 	} = $props<{
-		storage?: any;
+		storage?: FirebaseStorage | null;
 		uploadPath?: string;
 		autoStart?: boolean;
 		maxFileSize?: number;
 		allowedFileTypes?: string[];
 		showFileTypeError?: boolean;
+		ariaLabel?: string;
 	}>();
 
 	// Upload manager instance
 	let uploadManager = $state<FirebaseUploadManager | null>(null);
 
-	// File state
-	let files = $state<File[]>([]);
+	// Component state
 	let isDragOver = $state<boolean>(false);
 	let fileInput = $state<HTMLInputElement>();
+	let uploadError = $state<string | null>(null);
+	let errorTimeout = $state<NodeJS.Timeout | null>(null);
 
-	// Upload state
+	// Upload state (derived from upload manager)
 	let isUploading = $state<boolean>(false);
 	let uploadProgress = $state<number>(0);
 	let uploadStatus = $state<string>('idle');
-	let uploadError = $state<string | null>(null);
 
 	// Derived file arrays
 	let queuedFiles = $derived(getFilesByStatus('queued'));
@@ -120,10 +123,13 @@
 			return;
 		}
 
+		// Clear any existing errors
+		clearError();
+
 		// Validate files
 		const validationResult = validateFiles(newFiles);
 		if (!validationResult.valid) {
-			uploadError = validationResult.error || 'Validation failed';
+			setError(validationResult.error || 'Validation failed');
 			return;
 		}
 
@@ -133,16 +139,16 @@
 				path: uploadPath
 			});
 
-			// Update local files state
-			files = [...files, ...newFiles];
-
 			// Clear file input
 			if (fileInput) {
 				fileInput.value = '';
 			}
+
+			// Announce success to screen readers
+			announceToScreenReader(`${addedCount} file(s) added successfully`);
 		} catch (error) {
 			console.error('Error adding files:', error);
-			uploadError = error instanceof Error ? error.message : 'Failed to add files';
+			setError(error instanceof Error ? error.message : 'Failed to add files');
 		}
 	}
 
@@ -245,10 +251,47 @@
 		return uploadManager.getAllFiles(status);
 	}
 
+	// Error handling utilities
+	function setError(message: string): void {
+		uploadError = message;
+		// Auto-clear error after 10 seconds
+		if (errorTimeout) {
+			clearTimeout(errorTimeout);
+		}
+		errorTimeout = setTimeout(() => {
+			uploadError = null;
+		}, 10000);
+		
+		// Announce error to screen readers
+		announceToScreenReader(`Error: ${message}`);
+	}
+
+	function clearError(): void {
+		uploadError = null;
+		if (errorTimeout) {
+			clearTimeout(errorTimeout);
+			errorTimeout = null;
+		}
+	}
+
+	// Accessibility utility
+	function announceToScreenReader(message: string): void {
+		const announcement = document.createElement('div');
+		announcement.setAttribute('aria-live', 'polite');
+		announcement.setAttribute('aria-atomic', 'true');
+		announcement.className = 'sr-only';
+		announcement.textContent = message;
+		document.body.appendChild(announcement);
+		setTimeout(() => document.body.removeChild(announcement), 1000);
+	}
+
 	// Cleanup on component destroy
 	onDestroy(() => {
 		if (uploadManager) {
 			uploadManager.destroy();
+		}
+		if (errorTimeout) {
+			clearTimeout(errorTimeout);
 		}
 	});
 </script>
@@ -257,7 +300,8 @@
 	<div
 		role="button"
 		tabindex="0"
-		aria-label="Drop files here or click to browse"
+		aria-label={ariaLabel}
+		aria-describedby="upload-instructions"
 		class="upload-area {isDragOver ? 'dragover' : ''}"
 		ondragover={handleDragOver}
 		ondragleave={handleDragLeave}
@@ -270,13 +314,16 @@
 				<FilesIcon />
 			</div>
 
-			<div class="upload-text">
+			<div class="upload-text" id="upload-instructions">
 				<span class="upload-main-text">Drop your files here or </span>
 				<span class="upload-browse-text">browse</span>
 			</div>
 
-			<div class="upload-formats">
+			<div class="upload-formats" aria-live="polite">
 				{allowedFileTypes.length > 0 ? allowedFileTypes.join(', ').toUpperCase() : 'ALL FILE TYPES'}
+				{#if maxFileSize}
+					<span class="max-size">Max size: {Math.round(maxFileSize / (1024 * 1024))}MB</span>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -294,15 +341,19 @@
 
 	<!-- Upload Progress -->
 	{#if isUploading || uploadProgress > 0}
-		<div class="upload-progress-container">
+		<div class="upload-progress-container" role="region" aria-label="Upload progress">
 			<div class="upload-progress-header">
-				<span class="upload-status">{uploadStatus}</span>
-				<span class="upload-percentage"
-					>{Math.round(uploadProgress)}% (bytes) / {fileProgress}% (files)</span
-				>
+				<span class="upload-status" aria-live="polite">{uploadStatus}</span>
+				<span class="upload-percentage" aria-live="polite">
+					{Math.round(uploadProgress)}% (bytes) / {fileProgress}% (files)
+				</span>
 			</div>
 
-			<div class="upload-progress-bar">
+			<div class="upload-progress-bar" role="progressbar" 
+				 aria-valuenow={Math.round(uploadProgress)}
+				 aria-valuemin="0" 
+				 aria-valuemax="100"
+				 aria-label="Upload progress">
 				<div class="upload-progress-fill" style="width: {uploadProgress}%"></div>
 			</div>
 
@@ -476,6 +527,14 @@
 		color: #9ca3af;
 		font-size: 14px;
 		font-weight: 400;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.max-size {
+		color: #6b7280;
+		font-size: 12px;
 	}
 
 	.sr-only {

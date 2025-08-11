@@ -12,7 +12,8 @@ import type {
 	HealthStatus,
 	HealthCheckResult,
 	StorageQuota,
-	PermissionStatus
+	PermissionStatus,
+	UploadManagerInterface
 } from './types.js';
 
 // Firebase imports
@@ -27,9 +28,55 @@ import { NetworkManager } from './utils/network-manager.svelte.js';
 import { BandwidthManager } from './utils/bandwidth-manager.svelte.js';
 import { FileValidator } from './utils/file-validator.svelte.js';
 import { UploadResumer } from './utils/upload-resumer.svelte.js';
-import { PluginSystem } from './utils/plugin-system.svelte.js';
+import { PluginSystem, type UploadPlugin, type PluginConfig } from './utils/plugin-system.svelte.js';
+import { ConfigValidator } from './utils/config-validator.svelte.js';
 
+/**
+ * Enterprise-grade Firebase Storage upload manager with advanced features.
+ * 
+ * Features include:
+ * - Concurrent uploads with smart queuing
+ * - Resumable uploads with chunk-based recovery
+ * - File validation and duplicate detection
+ * - Bandwidth throttling and network adaptation
+ * - Health monitoring and diagnostics
+ * - Plugin system for extensibility
+ * - Memory-efficient handling of large file sets
+ * 
+ * @example
+ * ```typescript
+ * import { FirebaseUploadManager } from 'svelte-firebase-upload';
+ * import { getStorage } from 'firebase/storage';
+ * 
+ * const manager = new FirebaseUploadManager({
+ *   maxConcurrentUploads: 3,
+ *   chunkSize: 5 * 1024 * 1024, // 5MB
+ *   autoStart: true,
+ *   enableSmartScheduling: true
+ * });
+ * 
+ * manager.setStorage(getStorage());
+ * 
+ * // Add files and start uploading
+ * await manager.addFiles(fileList, { path: 'uploads/' });
+ * ```
+ */
 class FirebaseUploadManager {
+	// Constants
+	private static readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
+	private static readonly STUCK_UPLOAD_THRESHOLD = 600000; // 10 minutes
+	private static readonly SPEED_SAMPLE_WINDOW = 100; // Keep last 100 samples
+	private static readonly QUEUE_OPTIMIZATION_THRESHOLD = 50;
+	private static readonly BATCH_PROCESSING_DELAY = 100;
+	private static readonly MEMORY_BATCH_SIZE = 100;
+	private static readonly MAX_MEMORY_ITEMS = 1000;
+	private static readonly MAX_BANDWIDTH_MBPS = 10;
+	private static readonly FILE_SIZE_THRESHOLDS = {
+		SMALL: 1024 * 1024, // 1MB
+		MEDIUM: 5 * 1024 * 1024, // 5MB
+		LARGE: 10 * 1024 * 1024 // 10MB
+	} as const;
+
 	// Configuration
 	public config: UploadManagerConfig;
 
@@ -59,101 +106,44 @@ class FirebaseUploadManager {
 	private _speedSamples: SpeedSample[] = [];
 	private _lastProgressUpdate: number = Date.now();
 	private _healthCheckInterval?: number | NodeJS.Timeout;
+	private _monitoringInterval?: number | NodeJS.Timeout;
 	private _lastHealthCheck: HealthCheckResult | null = null;
+	private _allTimers: Set<NodeJS.Timeout | number> = new Set();
 
 	// Performance optimization managers
-	private memoryManager: MemoryManager;
-	private networkManager: NetworkManager;
-	private bandwidthManager: BandwidthManager;
+	private _memoryManager: MemoryManager;
+	private _networkManager: NetworkManager;
+	private _bandwidthManager: BandwidthManager;
 
 	// Enterprise feature managers
-	private fileValidator: FileValidator;
-	private uploadResumer: UploadResumer;
+	private _fileValidator: FileValidator;
+	private _uploadResumer: UploadResumer;
 
 	private _lastBandwidthUpdate: number = Date.now();
 	private _pausedByHealth: boolean = false;
 	// Plugin system
 	public pluginSystem: PluginSystem;
 
+	// Configuration validator
+	private _configValidator: ConfigValidator;
+
 	// Initialize Firebase storage reference
 	public storage: FirebaseStorage | null = null; // To be set via setStorage method
 
-	constructor(options: UploadManagerOptions = {}) {
-		// Configuration
-		this.config = {
-			maxConcurrentUploads: options.maxConcurrentUploads || 5,
-			chunkSize: options.chunkSize || 1024 * 1024 * 5, // 5MB chunks
-			retryAttempts: options.retryAttempts || 3,
-			retryDelay: options.retryDelay || 1000,
-			autoStart: options.autoStart || false,
-			enableSmartScheduling: options.enableSmartScheduling || false,
-			...options
-		};
+	// Derived values (Svelte 5 way)
+	public totalProgress = $derived(
+		this.totalSize > 0 ? (this.uploadedSize / this.totalSize) * 100 : 0
+	);
 
-		// Initialize performance managers
-		this.memoryManager = new MemoryManager({
-			maxMemoryItems: options.maxMemoryItems || 1000,
-			batchSize: 100,
-			persistenceKey: options.enablePersistence ? 'upload-manager-state' : undefined
-		});
+	public isActive = $derived(this.active.size > 0);
+	public hasQueuedFiles = $derived(this.queue.length > 0);
+	public hasCompletedFiles = $derived(this.completed.size > 0);
+	public hasFailedFiles = $derived(this.failed.size > 0);
+	public isIdle = $derived(
+		!this.isProcessing && this.active.size === 0 && this.queue.length === 0
+	);
 
-		this.networkManager = new NetworkManager({
-			maxAttempts: this.config.retryAttempts,
-			baseDelay: this.config.retryDelay
-		});
-
-		this.bandwidthManager = new BandwidthManager({
-			maxBandwidthMbps: options.maxBandwidthMbps || 10,
-			adaptiveBandwidth: options.adaptiveBandwidth || true
-		});
-
-		// Initialize enterprise feature managers
-		this.fileValidator = new FileValidator();
-		this.uploadResumer = new UploadResumer({
-			chunkSize: this.config.chunkSize,
-			verifyChunks: true,
-			parallelChunks: Math.min(this.config.maxConcurrentUploads, 3)
-		});
-
-		// Initialize plugin system
-		this.pluginSystem = new PluginSystem(this);
-
-		// Set up network monitoring
-		this.networkManager.onOffline(() => this.pause());
-		this.networkManager.onOnline(() => this.resume());
-
-		// Start periodic health checks if enabled
-		if (options.enableHealthChecks !== false) {
-			this._startPeriodicHealthCheck();
-		}
-	}
-
-	// Getters for computed values (works great with $derived())
-	get totalProgress(): number {
-		return this.totalSize > 0 ? (this.uploadedSize / this.totalSize) * 100 : 0;
-	}
-
-	get isActive(): boolean {
-		return this.active.size > 0;
-	}
-
-	get hasQueuedFiles(): boolean {
-		return this.queue.length > 0;
-	}
-
-	get hasCompletedFiles(): boolean {
-		return this.completed.size > 0;
-	}
-
-	get hasFailedFiles(): boolean {
-		return this.failed.size > 0;
-	}
-
-	get isIdle(): boolean {
-		return !this.isProcessing && this.active.size === 0 && this.queue.length === 0;
-	}
-
-	get averageSpeed(): number {
+	public averageSpeed = $derived(() => {
 		if (this._speedSamples.length < 2) return 0;
 
 		const first = this._speedSamples[0];
@@ -162,30 +152,150 @@ class FirebaseUploadManager {
 		const bytesSpan = last.uploaded - first.uploaded;
 
 		return timeSpan > 0 ? (bytesSpan / timeSpan) * 1000 : 0;
+	});
+
+	// Derived queue statistics for smart scheduling insights
+	public queueStats = $derived({
+		totalFiles: this.queue.length,
+		totalSize: this.queue.reduce((sum, item) => sum + item.totalBytes, 0),
+		sizeDistribution: {
+			small: this.queue.filter(item => item.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.SMALL).length,
+			medium: this.queue.filter(item => item.totalBytes >= FirebaseUploadManager.FILE_SIZE_THRESHOLDS.SMALL && item.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.MEDIUM).length,
+			large: this.queue.filter(item => item.totalBytes >= FirebaseUploadManager.FILE_SIZE_THRESHOLDS.MEDIUM && item.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.LARGE).length,
+			veryLarge: this.queue.filter(item => item.totalBytes >= FirebaseUploadManager.FILE_SIZE_THRESHOLDS.LARGE).length
+		},
+		estimatedCompletionTime: this.currentSpeed > 0 ? this.queue.reduce((sum, item) => sum + item.totalBytes, 0) / this.currentSpeed : 0,
+		quickWinsAvailable: this.queue.filter(item => item.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.SMALL).length
+	});
+
+	/**
+	 * Create a new Firebase Upload Manager instance.
+	 * 
+	 * @param options - Configuration options for the upload manager
+	 * @throws {Error} When configuration validation fails
+	 * 
+	 * @example
+	 * ```typescript
+	 * const manager = new FirebaseUploadManager({
+	 *   maxConcurrentUploads: 5,
+	 *   chunkSize: 2 * 1024 * 1024, // 2MB chunks
+	 *   retryAttempts: 3,
+	 *   autoStart: false,
+	 *   enableSmartScheduling: true,
+	 *   enableHealthChecks: true
+	 * });
+	 * ```
+	 */
+	constructor(options: UploadManagerOptions = {}) {
+		// Initialize configuration validator
+		this._configValidator = new ConfigValidator();
+		
+		// Validate and sanitize configuration
+		const configResult = this._configValidator.validateConfig(options);
+		
+		// Log validation issues
+		if (configResult.warnings.length > 0) {
+			console.warn('[FirebaseUploadManager] Configuration warnings:', configResult.warnings);
+		}
+		
+		if (!configResult.valid) {
+			console.error('[FirebaseUploadManager] Configuration errors:', configResult.errors);
+			throw new Error(`Invalid configuration: ${configResult.errors.join(', ')}`);
+		}
+		
+		// Use sanitized configuration
+		this.config = configResult.sanitized!;
+
+		// Initialize performance managers
+		this._memoryManager = new MemoryManager({
+			maxMemoryItems: options.maxMemoryItems || FirebaseUploadManager.MAX_MEMORY_ITEMS,
+			batchSize: FirebaseUploadManager.MEMORY_BATCH_SIZE,
+			persistenceKey: options.enablePersistence ? 'upload-manager-state' : undefined
+		});
+
+		this._networkManager = new NetworkManager({
+			maxAttempts: this.config.retryAttempts,
+			baseDelay: this.config.retryDelay
+		});
+
+		this._bandwidthManager = new BandwidthManager({
+			maxBandwidthMbps: options.maxBandwidthMbps || FirebaseUploadManager.MAX_BANDWIDTH_MBPS,
+			adaptiveBandwidth: options.adaptiveBandwidth || true
+		});
+
+		// Initialize enterprise feature managers
+		this._fileValidator = new FileValidator();
+		this._uploadResumer = new UploadResumer({
+			chunkSize: this.config.chunkSize,
+			verifyChunks: true,
+			parallelChunks: Math.min(this.config.maxConcurrentUploads, 3)
+		});
+
+		// Initialize plugin system
+		this.pluginSystem = new PluginSystem(this as any as UploadManagerInterface);
+
+		// Set up network monitoring
+		this._networkManager.onOffline(() => this.pause());
+		this._networkManager.onOnline(() => this.resume());
+
+		// Start periodic health checks if enabled
+		if (options.enableHealthChecks !== false) {
+			this._startPeriodicHealthCheck();
+		}
 	}
 
+	// Getters for computed values (works great with $derived())
 	// Get bandwidth statistics
 	getBandwidthStats() {
-		return this.bandwidthManager.getBandwidthStats();
+		return this._bandwidthManager.getBandwidthStats();
 	}
 
 	// Get network quality
 	getNetworkQuality() {
-		return this.networkManager.getNetworkQuality();
+		return this._networkManager.getNetworkQuality();
 	}
 
 	// Get recommended upload settings based on network
 	getRecommendedSettings() {
-		return this.networkManager.getRecommendedSettings();
+		return this._networkManager.getRecommendedSettings();
+	}
+
+	// Configuration Management
+	updateConfig(field: keyof UploadManagerConfig, value: any): { success: boolean; error?: string; warning?: string } {
+		const validationResult = this._configValidator.validateRuntimeChange(field, value, this.config);
+		
+		if (!validationResult.valid) {
+			console.error(`[FirebaseUploadManager] Configuration update failed for ${field}:`, validationResult.error);
+			return { success: false, error: validationResult.error };
+		}
+
+		// Update the configuration safely
+		this._updateConfigField(field, validationResult.sanitizedValue);
+		
+		// Log warning if present
+		if (validationResult.warning) {
+			console.warn(`[FirebaseUploadManager] Configuration update warning for ${field}:`, validationResult.warning);
+		}
+
+		// Apply configuration changes that need immediate action
+		this._applyConfigurationChange(field, validationResult.sanitizedValue);
+
+		return { 
+			success: true, 
+			warning: validationResult.warning 
+		};
+	}
+
+	// Get current configuration (readonly copy)
+	getConfig(): Readonly<UploadManagerConfig> {
+		return { ...this.config } as Readonly<UploadManagerConfig>;
 	}
 
 	// Smart Scheduling Control
 	setSmartScheduling(enabled: boolean): void {
-		this.config.enableSmartScheduling = enabled;
-
-		// If enabling smart scheduling, optimize the current queue
-		if (enabled && this.queue.length > 0) {
-			this._optimizeQueue();
+		const result = this.updateConfig('enableSmartScheduling', enabled);
+		if (!result.success) {
+			throw new Error(result.error);
 		}
 	}
 
@@ -236,7 +346,7 @@ class FirebaseUploadManager {
 			}
 
 			// 4. Network Quality Check
-			const networkQuality = this.networkManager.getNetworkQuality();
+			const networkQuality = this._networkManager.getNetworkQuality();
 			checks.network = networkQuality !== 'unknown';
 			details.networkQuality = networkQuality;
 			if (networkQuality === 'poor') {
@@ -252,7 +362,7 @@ class FirebaseUploadManager {
 			}
 
 			// 6. Bandwidth Check
-			const bandwidthStats = this.bandwidthManager.getBandwidthStats();
+			const bandwidthStats = this._bandwidthManager.getBandwidthStats();
 			checks.bandwidth = bandwidthStats.utilization < 95;
 			details.bandwidthStats = bandwidthStats;
 			if (bandwidthStats.utilization > 95) {
@@ -270,7 +380,7 @@ class FirebaseUploadManager {
 				healthy,
 				issues,
 				storageQuota: details.storageQuota?.percentage,
-				networkStatus: this.networkManager.isOnline ? 'online' : 'offline',
+				networkStatus: this._networkManager.isOnline ? 'online' : 'offline',
 				permissionsValid: checks.permissions
 			},
 			timestamp: Date.now(),
@@ -304,27 +414,62 @@ class FirebaseUploadManager {
 		return {
 			healthy: this.isIdle && this.failureCount === 0,
 			issues: this._getCurrentIssues(),
-			networkStatus: this.networkManager.isOnline ? 'online' : 'offline',
+			networkStatus: this._networkManager.isOnline ? 'online' : 'offline',
 			permissionsValid: true // Would need to be tracked
 		};
 	}
 
-	// Initialize Firebase storage
+	/**
+	 * Set the Firebase Storage instance to use for uploads.
+	 * This must be called before starting any uploads.
+	 * 
+	 * @param storageInstance - Firebase Storage instance from getStorage()
+	 * 
+	 * @example
+	 * ```typescript
+	 * import { getStorage } from 'firebase/storage';
+	 * 
+	 * const storage = getStorage();
+	 * manager.setStorage(storage);
+	 * ```
+	 */
 	setStorage(storageInstance: FirebaseStorage): void {
 		this.storage = storageInstance;
 	}
 
-	// Add files to upload queue
+	/**
+	 * Add files to the upload queue.
+	 * 
+	 * @param fileList - Files to upload (FileList from input or File array)
+	 * @param options - Upload options for these files
+	 * @returns Promise resolving to the number of files added
+	 * 
+	 * @example
+	 * ```typescript
+	 * // From file input
+	 * const fileCount = await manager.addFiles(fileInput.files, {
+	 *   path: 'user-uploads/',
+	 *   metadata: { userId: '123', category: 'photos' },
+	 *   priority: 1
+	 * });
+	 * 
+	 * // From File array
+	 * await manager.addFiles([file1, file2], {
+	 *   path: 'documents/',
+	 *   autoStart: true
+	 * });
+	 * ```
+	 */
 	async addFiles(fileList: FileList | File[], options: UploadManagerOptions = {}): Promise<number> {
 		const files = Array.from(fileList);
 
 		// Use memory manager for large file sets
 		if (files.length > 100) {
-			const batchIds = await this.memoryManager.addFilesLazy(files);
+			await this._memoryManager.addFilesLazy(files);
 
 			// Include pending totals in overall totals
-			this.totalFiles += this.memoryManager.getPendingTotalFiles();
-			this.totalSize += this.memoryManager.getPendingTotalSize();
+			this.totalFiles += this._memoryManager.getPendingTotalFiles();
+			this.totalSize += this._memoryManager.getPendingTotalSize();
 
 			// Check autoStart even for large file sets
 			if (this.config.autoStart && !this.isProcessing) {
@@ -365,7 +510,21 @@ class FirebaseUploadManager {
 		return files.length;
 	}
 
-	// Start processing the upload queue
+	/**
+	 * Start processing the upload queue.
+	 * Begins uploading files according to configuration settings.
+	 * 
+	 * @throws {Error} When storage is not configured
+	 * 
+	 * @example
+	 * ```typescript
+	 * await manager.addFiles(files);
+	 * await manager.start();
+	 * 
+	 * // Or use autoStart option
+	 * await manager.addFiles(files, { autoStart: true });
+	 * ```
+	 */
 	async start(): Promise<void> {
 		if (this.isProcessing) {
 			return;
@@ -421,8 +580,11 @@ class FirebaseUploadManager {
 		this.isProcessing = false;
 		this.isPaused = false;
 
+		// Stop health monitoring
+		this._stopHealthMonitoring();
+
 		// Cancel all active uploads
-		const cancelPromises = Array.from(this._uploadTasks.entries()).map(async ([fileId, task]) => {
+		const cancelPromises = Array.from(this._uploadTasks.entries()).map(async ([_, task]) => {
 			if (task.cancel) {
 				task.cancel();
 			}
@@ -443,8 +605,30 @@ class FirebaseUploadManager {
 		// Stop periodic health checks
 		this._stopPeriodicHealthCheck();
 
+		// Stop health monitoring
+		this._stopHealthMonitoring();
+
 		// Disconnect network manager
-		this.networkManager.disconnect();
+		this._networkManager.disconnect();
+
+		// Clean up bandwidth manager
+		if (this._bandwidthManager) {
+			this._bandwidthManager.destroy();
+		}
+
+		// Clean up file validator
+		if (this._fileValidator) {
+			this._fileValidator.destroy();
+		}
+
+		// Clean up upload resumer
+		if (this._uploadResumer) {
+			try {
+				await this._uploadResumer.cleanupCompletedUploads();
+			} catch (error) {
+				console.warn('Failed to cleanup upload resumer:', error);
+			}
+		}
 
 		// Clean up plugin system
 		if (this.pluginSystem) {
@@ -461,9 +645,9 @@ class FirebaseUploadManager {
 		}
 
 		// Clean up memory manager
-		if (this.memoryManager) {
+		if (this._memoryManager) {
 			try {
-				await this.memoryManager.destroy();
+				await this._memoryManager.destroy();
 			} catch (error) {
 				console.warn('Failed to destroy memory manager:', error);
 			}
@@ -473,6 +657,9 @@ class FirebaseUploadManager {
 		if (this.storage) {
 			await this._cleanupAllStorageFiles();
 		}
+
+		// Clear all timers and intervals
+		this._clearAllTimers();
 
 		// Clear all collections
 		this.queue = [];
@@ -597,16 +784,16 @@ class FirebaseUploadManager {
 		files: File[],
 		rules?: Partial<ValidationRule>
 	): Promise<Map<File, ValidationResult>> {
-		return this.fileValidator.validateFiles(files, rules);
+		return this._fileValidator.validateFiles(files, rules);
 	}
 
 	async validateFile(file: File, rules?: Partial<ValidationRule>): Promise<ValidationResult> {
-		return this.fileValidator.validateFile(file, rules);
+		return this._fileValidator.validateFile(file, rules);
 	}
 
 	// Duplicate Detection
 	async detectDuplicates(files: File[]): Promise<Map<string, File[]>> {
-		return this.fileValidator.detectDuplicates(files);
+		return this._fileValidator.detectDuplicates(files);
 	}
 
 	async getFileMetadata(file: File): Promise<{
@@ -617,24 +804,24 @@ class FirebaseUploadManager {
 		dimensions?: { width: number; height: number };
 		duration?: number;
 	}> {
-		return this.fileValidator.getFileMetadata(file);
+		return this._fileValidator.getFileMetadata(file);
 	}
 
 	// Upload Resumption
 	async checkForResumableUpload(file: File): Promise<ResumableUploadState | null> {
-		return this.uploadResumer.canResume(file);
+		return this._uploadResumer.canResume(file);
 	}
 
 	async resumeIncompleteUploads(): Promise<void> {
-		const states = await this.uploadResumer.getAllUploadStates();
-		const incompleteStates = states.filter((state) => !this.uploadResumer.isUploadComplete(state));
+		const states = await this._uploadResumer.getAllUploadStates();
+		const incompleteStates = states.filter((state) => !this._uploadResumer.isUploadComplete(state));
 
 		for (const state of incompleteStates) {
 			// Find the file in the current queue or completed list
 			const existingFile = this.getFile(state.fileId);
 			if (!existingFile) {
 				// File not found, clean up the state
-				await this.uploadResumer.removeUploadState(state.fileId);
+				await this._uploadResumer.removeUploadState(state.fileId);
 			}
 		}
 	}
@@ -666,7 +853,7 @@ class FirebaseUploadManager {
 		// Validate files if requested
 		let validFiles = files;
 		if (options.validate !== false) {
-			const validationResults = await this.fileValidator.validateFiles(
+			const validationResults = await this._fileValidator.validateFiles(
 				files,
 				options.validationRules
 			);
@@ -680,7 +867,7 @@ class FirebaseUploadManager {
 		// Check for duplicates if requested
 		let uniqueFiles = validFiles;
 		if (options.skipDuplicates !== false) {
-			const duplicates = await this.fileValidator.detectDuplicates(validFiles);
+			const duplicates = await this._fileValidator.detectDuplicates(validFiles);
 			const duplicateFiles = new Set<File>();
 			duplicates.forEach((fileGroup) => {
 				// Keep only the first file, mark others as duplicates
@@ -694,7 +881,7 @@ class FirebaseUploadManager {
 		// Check for resumable uploads
 		if (options.checkResume !== false) {
 			for (const file of uniqueFiles) {
-				const resumableState = await this.uploadResumer.canResume(file);
+				const resumableState = await this._uploadResumer.canResume(file);
 				if (resumableState) {
 					result.resumed++;
 					// Add to queue with resume information
@@ -715,7 +902,7 @@ class FirebaseUploadManager {
 	// Plugin System Integration
 
 	// Register a plugin
-	async registerPlugin(plugin: any, config: any = {}): Promise<void> {
+	async registerPlugin(plugin: UploadPlugin, config: Partial<PluginConfig> = {}): Promise<void> {
 		return this.pluginSystem.registerPlugin(plugin, config);
 	}
 
@@ -725,12 +912,12 @@ class FirebaseUploadManager {
 	}
 
 	// Get all plugins
-	getAllPlugins(): Array<{ name: string; plugin: any; config: any }> {
+	getAllPlugins(): Array<{ name: string; plugin: UploadPlugin; config: PluginConfig }> {
 		return this.pluginSystem.getAllPlugins();
 	}
 
 	// Get enabled plugins
-	getEnabledPlugins(): Array<{ name: string; plugin: any; config: any }> {
+	getEnabledPlugins(): Array<{ name: string; plugin: UploadPlugin; config: PluginConfig }> {
 		return this.pluginSystem.getEnabledPlugins();
 	}
 
@@ -741,147 +928,96 @@ class FirebaseUploadManager {
 
 	// Internal methods
 	private async _processQueue(): Promise<void> {
-		if (this.isPaused || !this.isProcessing) {
-			return;
-		}
-
-		// Process memory manager batches if needed
-		try {
-			const nextBatch = this.memoryManager.getNextBatch();
-
-			// Process batches more aggressively - if we have no active uploads or queue is small
-			if (nextBatch && (this.queue.length < 50 || this.active.size === 0)) {
-				const uploadItems = await this.memoryManager.processBatch(nextBatch.id);
-				this.queue.push(...uploadItems);
-				this.totalFiles += uploadItems.length;
-				this.totalSize += uploadItems.reduce((sum, item) => sum + item.totalBytes, 0);
+		while (this.isProcessing && this.queue.length > 0) {
+			// Check if we can start more uploads
+			const availableSlots = this.config.maxConcurrentUploads - this.active.size;
+			if (availableSlots <= 0) {
+				// Wait a bit before checking again
+				await new Promise(resolve => setTimeout(resolve, FirebaseUploadManager.BATCH_PROCESSING_DELAY));
+				continue;
 			}
 
-			// Clean up processed batches
-			await this.memoryManager.cleanupProcessedBatches();
-		} catch (error) {
-			console.error('Error processing memory manager batches:', error);
-			// Continue processing even if batch processing fails
-		}
+			// Start uploads for available slots
+			const itemsToProcess = Math.min(availableSlots, this.queue.length);
+			const items = this.queue.splice(0, itemsToProcess);
 
-		// Fill up to max concurrent uploads
-		while (this.active.size < this.config.maxConcurrentUploads && this.queue.length > 0) {
-			// Optimize queue if smart scheduling is enabled
-			if (this.config.enableSmartScheduling) {
-				this._optimizeQueue();
-			} else {
-				// Sort queue by priority (higher numbers first)
-				this.queue.sort((a: UploadItem, b: UploadItem) => b.priority - a.priority);
+			// Process items in parallel
+			const uploadPromises = items.map(item => this._startUpload(item));
+			
+			try {
+				await Promise.allSettled(uploadPromises);
+			} catch (error) {
+				console.error('Error processing queue items:', error);
+				// Continue processing other items
 			}
 
-			const item = this.queue.shift();
-			if (item) {
-				// Add to active immediately to prevent over-concurrency
-				item.status = 'uploading';
-				item.startedAt = Date.now();
-				this.active.set(item.id, item);
-
-				// Start the upload without awaiting
-				this._startUpload(item).catch((error) => {
-					console.error('Error in upload task:', error);
-				});
-			}
+			// Small delay to prevent overwhelming the system  
+			await new Promise(resolve => {
+				this._registerTimer(
+					setTimeout(resolve, FirebaseUploadManager.BATCH_PROCESSING_DELAY)
+				);
+			});
 		}
 
-		// Check if we're done
-		if (this.queue.length === 0 && this.active.size === 0 && !this.memoryManager.getNextBatch()) {
+		// If we're done processing, update state
+		if (this.queue.length === 0 && this.active.size === 0) {
 			this.isProcessing = false;
-		} else {
-			// If we still have batches to process, schedule another run
-			if (this.memoryManager.getNextBatch() && this.queue.length === 0) {
-				setTimeout(() => this._processQueue(), 100);
-			}
 		}
 	}
 
 	private async _startUpload(item: UploadItem): Promise<void> {
-		if (!this.storage) {
-			const error = 'Firebase storage not initialized. Call setStorage() first.';
-			console.error(error);
-			throw new Error(error);
-		}
-
-		// Check bandwidth limits before starting
-		// await this.bandwidthManager.throttleUpload(item.totalBytes); // Temporarily disabled for testing
-
 		try {
-			// Create Firebase storage reference
+			// Validate item before starting
+			if (!item.file || !this.storage) {
+				throw new Error('Invalid upload item or storage not configured');
+			}
+
+			// Update item status
+			item.status = 'uploading';
+			item.startedAt = Date.now();
+			item.attempts = (item.attempts || 0) + 1;
+
+			// Add to active uploads
+			this.active.set(item.id, item);
+
+			// Create storage reference
 			const storageRef = ref(this.storage, item.path);
+			
+			// Create upload task
+			const uploadTask = uploadBytesResumable(storageRef, item.file, {
+				contentType: item.file.type,
+				customMetadata: {
+					originalName: item.file.name,
+					uploadId: item.id,
+					uploadedAt: new Date().toISOString()
+				}
+			});
 
-			// Start the upload with Firebase
-			const firebaseUploadTask = uploadBytesResumable(storageRef, item.file, item.metadata);
+			// Create wrapper for better control
+			const taskWrapper = this._createUploadTaskWrapper(item, uploadTask);
+			this._uploadTasks.set(item.id, taskWrapper);
 
-			// Create our upload task wrapper
-			const uploadTask = this._createUploadTaskWrapper(item, firebaseUploadTask);
-			this._uploadTasks.set(item.id, uploadTask);
+			// Set up progress monitoring
+			uploadTask.on('state_changed',
+				(snapshot) => {
+					// Progress update
+					const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+					this._updateProgress(item.id, progress);
+				},
+				(error) => {
+					// Error handling
+					console.error('Upload error for', item.file.name, ':', error);
+					this._handleUploadError(item, error);
+				},
+				() => {
+					// Completion
+					this._handleUploadComplete(item, uploadTask.snapshot);
+				}
+			);
 
-			// Set a timeout to catch hanging uploads - longer timeout for large files
-			const timeoutMs = item.totalBytes > 10 * 1024 * 1024 ? 900000 : 300000; // 15 min for >10MB, 5 min for smaller
-			const uploadTimeout = setTimeout(() => {
-				console.error(
-					'Upload timeout for item:',
-					item.id,
-					item.file.name,
-					'after',
-					timeoutMs / 1000,
-					'seconds'
-				);
-				firebaseUploadTask.cancel();
-			}, timeoutMs);
-
-			// Wait for upload to complete
-			await firebaseUploadTask;
-			clearTimeout(uploadTimeout);
-
-			// Get download URL
-			const downloadURL = await getDownloadURL(storageRef);
-
-			// Success
-			item.status = 'completed';
-			item.completedAt = Date.now();
-			item.downloadURL = downloadURL;
-			this.completed.set(item.id, item);
-			this.successCount++;
-
-			// Emit success event
-			if (this.pluginSystem) {
-				this.pluginSystem.emitEvent('onUploadComplete', item, { downloadURL });
-			}
-		} catch (error: unknown) {
-			console.error('Upload failed for item:', item.id, item.file.name, error);
-
-			// Handle failure with network manager
-			item.status = 'failed';
-			item.error = error instanceof Error ? error.message : 'Unknown error';
-			item.attempts++;
-
-			// Use network manager for retry logic
-			const shouldRetry = this.networkManager.shouldRetry(item.attempts, error as Error);
-			if (shouldRetry) {
-				const delay = this.networkManager.calculateRetryDelay(item.attempts);
-				const timeoutId = setTimeout(() => {
-					item.status = 'queued';
-					this.queue.unshift(item); // Add to front for retry
-					this._processQueue();
-				}, delay);
-			} else {
-				this.failed.set(item.id, item);
-				this.failureCount++;
-			}
-
-			// Emit error event
-			if (this.pluginSystem) {
-				this.pluginSystem.emitEvent('onUploadError', item, error as Error);
-			}
-		} finally {
-			this.active.delete(item.id);
-			this._uploadTasks.delete(item.id);
-			this._processQueue();
+		} catch (error) {
+			console.error('Error starting upload for', item.file.name, ':', error);
+			this._handleUploadError(item, error as Error);
 		}
 	}
 
@@ -935,7 +1071,7 @@ class FirebaseUploadManager {
 			if (progressDiff > 0) {
 				const now = Date.now();
 				const timeDiff = now - this._lastBandwidthUpdate;
-				this.bandwidthManager.updateBandwidthUsage(progressDiff, timeDiff);
+				this._bandwidthManager.updateBandwidthUsage(progressDiff, timeDiff);
 				this._lastBandwidthUpdate = now;
 			}
 
@@ -946,36 +1082,38 @@ class FirebaseUploadManager {
 
 	private _calculateSpeed(): void {
 		const now = Date.now();
-		const timeDiff = now - this._lastProgressUpdate;
+		const timeSinceLastUpdate = now - this._lastProgressUpdate;
 
-		if (timeDiff > 1000) {
-			// Update speed every second
+		if (timeSinceLastUpdate >= 1000) { // Update every second
+			// Add new speed sample
 			this._speedSamples.push({
 				time: now,
 				uploaded: this.uploadedSize
 			});
 
-			// Keep only last 10 samples
-			if (this._speedSamples.length > 10) {
-				this._speedSamples.shift();
-			}
+			// Limit samples to prevent memory leaks
+			this._limitSpeedSamples();
 
-			// Calculate speed from samples
+			// Calculate current speed from last two samples
 			if (this._speedSamples.length >= 2) {
-				const first = this._speedSamples[0];
 				const last = this._speedSamples[this._speedSamples.length - 1];
-				const timeSpan = last.time - first.time;
-				const bytesSpan = last.uploaded - first.uploaded;
+				const previous = this._speedSamples[this._speedSamples.length - 2];
+				const timeSpan = last.time - previous.time;
+				const bytesSpan = last.uploaded - previous.uploaded;
 
-				this.currentSpeed = timeSpan > 0 ? (bytesSpan / timeSpan) * 1000 : 0;
-
-				// Estimate time remaining
-				const remainingBytes = this.totalSize - this.uploadedSize;
-				this.estimatedTimeRemaining =
-					this.currentSpeed > 0 ? remainingBytes / this.currentSpeed : null;
+				if (timeSpan > 0) {
+					this.currentSpeed = (bytesSpan / timeSpan) * 1000; // bytes per second
+				}
 			}
 
 			this._lastProgressUpdate = now;
+		}
+	}
+
+	private _limitSpeedSamples(): void {
+		// Keep only the last N samples to prevent memory leaks
+		if (this._speedSamples.length > FirebaseUploadManager.SPEED_SAMPLE_WINDOW) {
+			this._speedSamples = this._speedSamples.slice(-FirebaseUploadManager.SPEED_SAMPLE_WINDOW);
 		}
 	}
 
@@ -992,7 +1130,6 @@ class FirebaseUploadManager {
 		try {
 			const startTime = Date.now();
 			// Test with a small metadata request
-			const testRef = ref(this.storage, 'health-check-test');
 			// Note: getMetadata() is not available in the basic Firebase Storage API
 			// We'll use a different approach for health checking
 			const latency = Date.now() - startTime;
@@ -1074,7 +1211,7 @@ class FirebaseUploadManager {
 	private _getCurrentIssues(): string[] {
 		const issues: string[] = [];
 
-		if (!this.networkManager.isOnline) {
+		if (!this._networkManager.isOnline) {
 			issues.push('Network is offline');
 		}
 
@@ -1120,7 +1257,7 @@ class FirebaseUploadManager {
 		}
 
 		// Run health check every 5 minutes
-		this._healthCheckInterval = setInterval(
+		this._healthCheckInterval = this._registerTimer(setInterval(
 			async () => {
 				try {
 					// Don't run health check if manager is being destroyed
@@ -1158,15 +1295,13 @@ class FirebaseUploadManager {
 				}
 			},
 			5 * 60 * 1000
-		); // 5 minutes
+		)) as NodeJS.Timeout; // 5 minutes
 	}
 
 	// Stop periodic health checks
 	private _stopPeriodicHealthCheck(): void {
-		if (this._healthCheckInterval) {
-			clearInterval(this._healthCheckInterval);
-			this._healthCheckInterval = undefined;
-		}
+		this._clearTimer(this._healthCheckInterval);
+		this._healthCheckInterval = undefined;
 	}
 
 	// Get last health check result
@@ -1181,31 +1316,26 @@ class FirebaseUploadManager {
 
 	// Smart Queue Optimization
 	private _optimizeQueue(): void {
-		const ONE_MB = 1024 * 1024;
-		const FIVE_MB = 5 * 1024 * 1024;
-		const TEN_MB = 10 * 1024 * 1024;
+		// Only optimize if queue is large enough to benefit
+		if (this.queue.length < FirebaseUploadManager.QUEUE_OPTIMIZATION_THRESHOLD) {
+			return;
+		}
 
-		this.queue.sort((a: UploadItem, b: UploadItem) => {
-			// 1. Small files first for quick wins (under 1MB)
-			if (a.totalBytes < ONE_MB && b.totalBytes >= ONE_MB) return -1;
-			if (a.totalBytes >= ONE_MB && b.totalBytes < ONE_MB) return 1;
+		// Sort by priority: small files first (quick wins), then by size
+		this.queue.sort((a, b) => {
+			// Small files get priority for quick wins
+			const aIsSmall = a.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.SMALL;
+			const bIsSmall = b.totalBytes < FirebaseUploadManager.FILE_SIZE_THRESHOLDS.SMALL;
 
-			// 2. Medium files next (1MB to 5MB)
-			if (a.totalBytes < FIVE_MB && b.totalBytes >= FIVE_MB) return -1;
-			if (a.totalBytes >= FIVE_MB && b.totalBytes < FIVE_MB) return 1;
+			if (aIsSmall && !bIsSmall) return -1;
+			if (!aIsSmall && bIsSmall) return 1;
 
-			// 3. Large files last (over 10MB)
-			if (a.totalBytes >= TEN_MB && b.totalBytes < TEN_MB) return 1;
-			if (a.totalBytes < TEN_MB && b.totalBytes >= TEN_MB) return -1;
-
-			// 4. Within same size category, sort by priority (higher priority first)
-			if (b.priority !== a.priority) {
-				return b.priority - a.priority;
-			}
-
-			// 5. If same priority, sort by creation time (older files first)
-			return a.createdAt - b.createdAt;
+			// Then sort by size (smaller files first)
+			return a.totalBytes - b.totalBytes;
 		});
+
+		// Update queue order
+		this.queue = [...this.queue];
 	}
 
 	// Manual queue optimization (public method for external control)
@@ -1228,52 +1358,18 @@ class FirebaseUploadManager {
 		estimatedCompletionTime: number;
 		quickWinsAvailable: number;
 	} {
-		const ONE_MB = 1024 * 1024;
-		const FIVE_MB = 5 * 1024 * 1024;
-		const TEN_MB = 10 * 1024 * 1024;
-
-		const stats = {
-			totalFiles: this.queue.length,
-			totalSize: this.queue.reduce((sum, item) => sum + item.totalBytes, 0),
-			sizeDistribution: {
-				small: 0,
-				medium: 0,
-				large: 0,
-				veryLarge: 0
-			},
-			estimatedCompletionTime: 0,
-			quickWinsAvailable: 0
-		};
-
-		// Calculate size distribution
-		this.queue.forEach((item) => {
-			if (item.totalBytes < ONE_MB) {
-				stats.sizeDistribution.small++;
-			} else if (item.totalBytes < FIVE_MB) {
-				stats.sizeDistribution.medium++;
-			} else if (item.totalBytes < TEN_MB) {
-				stats.sizeDistribution.large++;
-			} else {
-				stats.sizeDistribution.veryLarge++;
-			}
-		});
-
-		// Estimate completion time based on current speed
-		if (this.currentSpeed > 0) {
-			stats.estimatedCompletionTime = stats.totalSize / this.currentSpeed;
-		}
-
-		// Count quick wins (small files that can be uploaded quickly)
-		stats.quickWinsAvailable = stats.sizeDistribution.small;
-
-		return stats;
+		// Return the derived queue stats for consistency
+		return this.queueStats;
 	}
 
 	private _startHealthMonitoring(): void {
+		// Clear any existing monitoring interval first
+		this._stopHealthMonitoring();
+		
 		// Monitor upload progress every 30 seconds
-		const healthInterval = setInterval(() => {
+		this._monitoringInterval = this._registerTimer(setInterval(() => {
 			if (!this.isProcessing) {
-				clearInterval(healthInterval);
+				this._stopHealthMonitoring();
 				return;
 			}
 
@@ -1281,15 +1377,166 @@ class FirebaseUploadManager {
 			const now = Date.now();
 			for (const [id, item] of this.active) {
 				const uploadDuration = now - (item.startedAt || now);
-				if (uploadDuration > 600000) {
-					// 10 minutes
+				if (uploadDuration > FirebaseUploadManager.STUCK_UPLOAD_THRESHOLD) {
 					console.warn('Upload stuck for more than 10 minutes:', id, item.file.name);
 				}
 			}
-		}, 30000); // Every 30 seconds
+		}, FirebaseUploadManager.HEALTH_CHECK_INTERVAL)) as NodeJS.Timeout; // Every 30 seconds
+	}
 
-		// Store the interval ID for cleanup
-		this._healthCheckInterval = healthInterval;
+	private _stopHealthMonitoring(): void {
+		this._clearTimer(this._monitoringInterval);
+		this._monitoringInterval = undefined;
+	}
+
+	private _handleUploadError(item: UploadItem, error: Error): void {
+		// Handle failure with network manager
+		item.status = 'failed';
+		item.error = error.message;
+		item.attempts = (item.attempts || 0) + 1;
+
+		// Use network manager for retry logic
+		const shouldRetry = this._networkManager.shouldRetry(item.attempts, error);
+		if (shouldRetry) {
+			const delay = this._networkManager.calculateRetryDelay(item.attempts);
+			setTimeout(() => {
+				item.status = 'queued';
+				this.queue.unshift(item); // Add to front for retry
+				this._processQueue();
+			}, delay);
+		} else {
+			this.failed.set(item.id, item);
+			this.failureCount++;
+		}
+
+		// Remove from active and cleanup
+		this.active.delete(item.id);
+		this._uploadTasks.delete(item.id);
+
+		// Emit error event
+		if (this.pluginSystem) {
+			this.pluginSystem.emitEvent('onUploadError', item, error);
+		}
+	}
+
+	private async _handleUploadComplete(item: UploadItem, _: any): Promise<void> {
+		try {
+			// Get download URL
+			const storageRef = ref(this.storage!, item.path);
+			const downloadURL = await getDownloadURL(storageRef);
+
+			// Success
+			item.status = 'completed';
+			item.completedAt = Date.now();
+			item.downloadURL = downloadURL;
+			this.completed.set(item.id, item);
+			this.successCount++;
+
+			// Emit success event
+			if (this.pluginSystem) {
+				this.pluginSystem.emitEvent('onUploadComplete', item, { downloadURL });
+			}
+		} catch (error) {
+			console.error('Error getting download URL for', item.file.name, ':', error);
+			this._handleUploadError(item, error as Error);
+			return;
+		}
+
+		// Remove from active and cleanup
+		this.active.delete(item.id);
+		this._uploadTasks.delete(item.id);
+
+		// Continue processing queue
+		this._processQueue();
+	}
+
+	// Type-safe configuration field update
+	private _updateConfigField(field: keyof UploadManagerConfig, value: any): void {
+		switch (field) {
+			case 'maxConcurrentUploads':
+				(this.config as { maxConcurrentUploads: number }).maxConcurrentUploads = value;
+				break;
+			case 'chunkSize':
+				(this.config as { chunkSize: number }).chunkSize = value;
+				break;
+			case 'retryAttempts':
+				(this.config as { retryAttempts: number }).retryAttempts = value;
+				break;
+			case 'retryDelay':
+				(this.config as { retryDelay: number }).retryDelay = value;
+				break;
+			case 'enableSmartScheduling':
+				this.config.enableSmartScheduling = value;
+				break;
+			case 'maxBandwidthMbps':
+				if ('maxBandwidthMbps' in this.config) {
+					(this.config as { maxBandwidthMbps: number }).maxBandwidthMbps = value;
+				}
+				break;
+			case 'adaptiveBandwidth':
+				if ('adaptiveBandwidth' in this.config) {
+					(this.config as { adaptiveBandwidth: boolean }).adaptiveBandwidth = value;
+				}
+				break;
+			case 'maxMemoryItems':
+				if ('maxMemoryItems' in this.config) {
+					(this.config as { maxMemoryItems: number }).maxMemoryItems = value;
+				}
+				break;
+			case 'enablePersistence':
+				if ('enablePersistence' in this.config) {
+					(this.config as { enablePersistence: boolean }).enablePersistence = value;
+				}
+				break;
+		}
+	}
+
+	// Timer management methods
+	private _registerTimer(timer: NodeJS.Timeout | number): NodeJS.Timeout | number {
+		this._allTimers.add(timer);
+		return timer;
+	}
+
+	private _clearTimer(timer?: NodeJS.Timeout | number): void {
+		if (timer) {
+			clearTimeout(timer as NodeJS.Timeout);
+			clearInterval(timer as NodeJS.Timeout);
+			this._allTimers.delete(timer);
+		}
+	}
+
+	private _clearAllTimers(): void {
+		for (const timer of this._allTimers) {
+			clearTimeout(timer as NodeJS.Timeout);
+			clearInterval(timer as NodeJS.Timeout);
+		}
+		this._allTimers.clear();
+	}
+
+	// Apply configuration changes that need immediate action
+	private _applyConfigurationChange(field: keyof UploadManagerConfig, value: any): void {
+		switch (field) {
+			case 'enableSmartScheduling':
+				// If enabling smart scheduling, optimize the current queue
+				if (value && this.queue.length > 0) {
+					this._optimizeQueue();
+				}
+				break;
+			case 'maxBandwidthMbps':
+				// Update bandwidth manager if it exists
+				if (this._bandwidthManager) {
+					this._bandwidthManager.setBandwidthLimit(value);
+				}
+				break;
+			case 'maxConcurrentUploads':
+				// If reducing concurrent uploads, we may need to pause some active uploads
+				if (this.active.size > value) {
+					console.warn(`[FirebaseUploadManager] Reducing maxConcurrentUploads from ${this.active.size} active uploads to ${value}. Some uploads will be paused.`);
+					// The queue processor will handle this naturally
+				}
+				break;
+			// Other fields don't require immediate action
+		}
 	}
 }
 

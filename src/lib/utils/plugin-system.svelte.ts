@@ -1,4 +1,4 @@
-import type { UploadItem, UploadStatus, ValidationResult } from '../types.js';
+import type { UploadItem, UploadStatus, ValidationResult, UploadManagerInterface } from '../types.js';
 
 // Plugin lifecycle hooks
 export interface UploadPlugin {
@@ -62,7 +62,6 @@ export interface PluginConfig {
 export interface PluginRegistryEntry {
 	plugin: UploadPlugin;
 	config: PluginConfig;
-	instance: any;
 }
 
 // Plugin event types
@@ -85,14 +84,12 @@ export type PluginEventType =
 	| 'onError';
 
 export class PluginSystem {
-	private plugins: Map<string, PluginRegistryEntry> = new Map();
-	private eventListeners: Map<PluginEventType, Array<{ plugin: UploadPlugin; handler: Function }>> =
-		new Map();
-	private manager: any;
+	private _plugins: Map<string, PluginRegistryEntry> = new Map();
+	private _manager: UploadManagerInterface;
+	private readonly _PLUGIN_TIMEOUT = 30000; // 30 seconds default timeout
 
-	constructor(manager: any) {
-		this.manager = manager;
-		this.initializeEventListeners();
+	constructor(manager: UploadManagerInterface) {
+		this._manager = manager;
 	}
 
 	// Register a plugin
@@ -104,27 +101,20 @@ export class PluginSystem {
 		};
 
 		// Check if plugin is already registered
-		if (this.plugins.has(plugin.name)) {
+		if (this._plugins.has(plugin.name)) {
 			throw new Error(`Plugin '${plugin.name}' is already registered`);
 		}
 
-		// Create plugin instance
-		const instance = this.createPluginInstance(plugin);
-
 		// Register plugin
-		this.plugins.set(plugin.name, {
+		this._plugins.set(plugin.name, {
 			plugin,
-			config: pluginConfig,
-			instance
+			config: pluginConfig
 		});
-
-		// Register event handlers
-		this.registerEventHandlers(plugin);
 
 		// Initialize plugin if enabled
 		if (pluginConfig.enabled && plugin.onInitialize) {
 			try {
-				await this.callPluginMethod(plugin, 'onInitialize', [this.manager]);
+				await this.callPluginMethod(plugin, 'onInitialize', [this._manager]);
 			} catch (error) {
 				console.error(`Failed to initialize plugin '${plugin.name}':`, error);
 			}
@@ -133,7 +123,7 @@ export class PluginSystem {
 
 	// Unregister a plugin
 	async unregisterPlugin(pluginName: string): Promise<void> {
-		const entry = this.plugins.get(pluginName);
+		const entry = this._plugins.get(pluginName);
 		if (!entry) {
 			throw new Error(`Plugin '${pluginName}' is not registered`);
 		}
@@ -149,16 +139,13 @@ export class PluginSystem {
 			}
 		}
 
-		// Remove event handlers
-		this.unregisterEventHandlers(plugin);
-
 		// Remove from registry
-		this.plugins.delete(pluginName);
+		this._plugins.delete(pluginName);
 	}
 
 	// Enable/disable a plugin
 	async setPluginEnabled(pluginName: string, enabled: boolean): Promise<void> {
-		const entry = this.plugins.get(pluginName);
+		const entry = this._plugins.get(pluginName);
 		if (!entry) {
 			throw new Error(`Plugin '${pluginName}' is not registered`);
 		}
@@ -167,7 +154,7 @@ export class PluginSystem {
 
 		if (enabled && entry.plugin.onInitialize) {
 			try {
-				await this.callPluginMethod(entry.plugin, 'onInitialize', [this.manager]);
+				await this.callPluginMethod(entry.plugin, 'onInitialize', [this._manager]);
 			} catch (error) {
 				console.error(`Failed to initialize plugin '${pluginName}':`, error);
 			}
@@ -176,13 +163,13 @@ export class PluginSystem {
 
 	// Get plugin by name
 	getPlugin(pluginName: string): UploadPlugin | null {
-		const entry = this.plugins.get(pluginName);
+		const entry = this._plugins.get(pluginName);
 		return entry ? entry.plugin : null;
 	}
 
 	// Get all registered plugins
 	getAllPlugins(): Array<{ name: string; plugin: UploadPlugin; config: PluginConfig }> {
-		const result = Array.from(this.plugins.entries()).map(([name, entry]) => ({
+		const result = Array.from(this._plugins.entries()).map(([name, entry]) => ({
 			name,
 			plugin: entry.plugin,
 			config: entry.config
@@ -196,12 +183,46 @@ export class PluginSystem {
 		return result;
 	}
 
-	// Call a plugin method
+	/**
+	 * Execute a plugin method with timeout protection.
+	 * 
+	 * @param operation - The async operation to execute
+	 * @param timeoutMs - Timeout in milliseconds
+	 * @param context - Context for error messages
+	 * @returns Promise that resolves with the operation result or rejects on timeout
+	 */
+	private async _withTimeout<T>(
+		operation: () => Promise<T>,
+		timeoutMs: number,
+		context: string
+	): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			const timer = setTimeout(() => {
+				reject(new Error(`Plugin operation '${context}' timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
+
+			operation()
+				.then(result => {
+					clearTimeout(timer);
+					resolve(result);
+				})
+				.catch(error => {
+					clearTimeout(timer);
+					reject(error);
+				});
+		});
+	}
+
+	// Call a plugin method with timeout protection
 	async callPluginMethod(plugin: UploadPlugin, methodName: string, args: any[]): Promise<any> {
 		const method = plugin[methodName];
 		if (typeof method === 'function') {
 			try {
-				const result = await method.apply(plugin, args);
+				const result = await this._withTimeout(
+					() => Promise.resolve(method.apply(plugin, args)),
+					this._PLUGIN_TIMEOUT,
+					`${plugin.name}.${methodName}`
+				);
 				return result;
 			} catch (error) {
 				console.error(
@@ -211,9 +232,13 @@ export class PluginSystem {
 					args,
 					error
 				);
-				if (plugin.onError) {
+				if (plugin.onError && methodName !== 'onError') {
 					try {
-						await this.callPluginMethod(plugin, 'onError', [error, { methodName, args }]);
+						await this._withTimeout(
+							() => Promise.resolve(plugin.onError!(error as Error, { methodName, args })),
+							5000, // Shorter timeout for error handlers
+							`${plugin.name}.onError`
+						);
 					} catch (errorHandlerError) {
 						console.error(`Error in plugin '${plugin.name}' error handler:`, errorHandlerError);
 					}
@@ -226,20 +251,20 @@ export class PluginSystem {
 
 	// Emit an event to all plugins
 	async emitEvent(eventType: PluginEventType, ...args: any[]): Promise<void> {
-		const listeners = this.eventListeners.get(eventType) || [];
+		const enabledPlugins = this.getEnabledPlugins();
 
 		// Sort by priority (higher priority first)
-		const sortedListeners = listeners.sort((a, b) => {
-			const aEntry = Array.from(this.plugins.values()).find((entry) => entry.plugin === a.plugin);
-			const bEntry = Array.from(this.plugins.values()).find((entry) => entry.plugin === b.plugin);
-			return (bEntry?.config.priority || 0) - (aEntry?.config.priority || 0);
-		});
+		const sortedPlugins = enabledPlugins.sort((a, b) => b.config.priority - a.config.priority);
 
-		for (const { plugin, handler } of sortedListeners) {
-			const entry = this.plugins.get(plugin.name);
-			if (entry?.config.enabled) {
+		for (const { plugin } of sortedPlugins) {
+			const method = plugin[eventType];
+			if (typeof method === 'function') {
 				try {
-					await handler.apply(plugin, args);
+					await this._withTimeout(
+						() => Promise.resolve(method.apply(plugin, args)),
+						this._PLUGIN_TIMEOUT,
+						`${plugin.name}.${eventType}`
+					);
 				} catch (error) {
 					console.error(
 						`[PluginSystem] Error in plugin '${plugin.name}' event handler for '${eventType}':`,
@@ -249,7 +274,11 @@ export class PluginSystem {
 					// Call error handler if available
 					if (plugin.onError) {
 						try {
-							await this.callPluginMethod(plugin, 'onError', [error, { eventType, args }]);
+							await this._withTimeout(
+								() => Promise.resolve(plugin.onError!(error as Error, { eventType, args })),
+								5000,
+								`${plugin.name}.onError`
+							);
 						} catch (errorHandlerError) {
 							console.error(`Error in plugin '${plugin.name}' error handler:`, errorHandlerError);
 						}
@@ -265,24 +294,24 @@ export class PluginSystem {
 		initialValue: T,
 		...args: any[]
 	): Promise<T> {
-		const listeners = this.eventListeners.get(eventType) || [];
+		const enabledPlugins = this.getEnabledPlugins();
 
 		// Sort by priority (higher priority first)
-		const sortedListeners = listeners.sort((a, b) => {
-			const aEntry = Array.from(this.plugins.values()).find((entry) => entry.plugin === a.plugin);
-			const bEntry = Array.from(this.plugins.values()).find((entry) => entry.plugin === b.plugin);
-			return (bEntry?.config.priority || 0) - (aEntry?.config.priority || 0);
-		});
+		const sortedPlugins = enabledPlugins.sort((a, b) => b.config.priority - a.config.priority);
 
 		let result = initialValue;
 
-		for (const { plugin, handler } of sortedListeners) {
-			const entry = this.plugins.get(plugin.name);
-			if (entry?.config.enabled) {
+		for (const { plugin } of sortedPlugins) {
+			const method = plugin[eventType];
+			if (typeof method === 'function') {
 				try {
-					const pluginResult = await handler.apply(plugin, [result, ...args]);
+					const pluginResult = await this._withTimeout(
+						() => method.apply(plugin, [result, ...args]),
+						this._PLUGIN_TIMEOUT,
+						`${plugin.name}.${eventType}`
+					);
 					if (pluginResult !== undefined) {
-						result = pluginResult;
+						result = pluginResult as T;
 					}
 				} catch (error) {
 					console.error(
@@ -292,10 +321,11 @@ export class PluginSystem {
 
 					if (plugin.onError) {
 						try {
-							await this.callPluginMethod(plugin, 'onError', [
-								error,
-								{ eventType, initialValue, args }
-							]);
+							await this._withTimeout(
+								() => Promise.resolve(plugin.onError!(error as Error, { eventType, initialValue, args })),
+								5000,
+								`${plugin.name}.onError`
+							);
 						} catch (errorHandlerError) {
 							console.error(`Error in plugin '${plugin.name}' error handler:`, errorHandlerError);
 						}
@@ -304,80 +334,5 @@ export class PluginSystem {
 			}
 		}
 		return result;
-	}
-
-	// Private methods
-	private createPluginInstance(plugin: UploadPlugin): any {
-		// Create a proxy to intercept method calls
-		return new Proxy(plugin, {
-			get(target, prop) {
-				if (typeof prop === 'string' && typeof (target as any)[prop] === 'function') {
-					return (target as any)[prop].bind(target);
-				}
-				return (target as any)[prop];
-			}
-		});
-	}
-
-	private initializeEventListeners(): void {
-		const eventTypes: PluginEventType[] = [
-			'initialize',
-			'destroy',
-			'beforeFileAdd',
-			'afterFileAdd',
-			'beforeValidation',
-			'afterValidation',
-			'beforeUpload',
-			'onUploadStart',
-			'onUploadProgress',
-			'onUploadComplete',
-			'onUploadError',
-			'beforeQueueProcess',
-			'afterQueueProcess',
-			'onStatusChange',
-			'onManagerStateChange',
-			'onError'
-		];
-
-		eventTypes.forEach((eventType) => {
-			this.eventListeners.set(eventType, []);
-		});
-	}
-
-	private registerEventHandlers(plugin: UploadPlugin): void {
-		const eventHandlers: Array<{ event: PluginEventType; method: string }> = [
-			{ event: 'beforeFileAdd', method: 'beforeFileAdd' },
-			{ event: 'afterFileAdd', method: 'afterFileAdd' },
-			{ event: 'beforeValidation', method: 'beforeValidation' },
-			{ event: 'afterValidation', method: 'afterValidation' },
-			{ event: 'beforeUpload', method: 'beforeUpload' },
-			{ event: 'onUploadStart', method: 'onUploadStart' },
-			{ event: 'onUploadProgress', method: 'onUploadProgress' },
-			{ event: 'onUploadComplete', method: 'onUploadComplete' },
-			{ event: 'onUploadError', method: 'onUploadError' },
-			{ event: 'beforeQueueProcess', method: 'beforeQueueProcess' },
-			{ event: 'afterQueueProcess', method: 'afterQueueProcess' },
-			{ event: 'onStatusChange', method: 'onStatusChange' },
-			{ event: 'onManagerStateChange', method: 'onManagerStateChange' },
-			{ event: 'onError', method: 'onError' }
-		];
-
-		eventHandlers.forEach(({ event, method }) => {
-			if (plugin[method]) {
-				const listeners = this.eventListeners.get(event) || [];
-				listeners.push({
-					plugin,
-					handler: plugin[method]
-				});
-				this.eventListeners.set(event, listeners);
-			}
-		});
-	}
-
-	private unregisterEventHandlers(plugin: UploadPlugin): void {
-		for (const [eventType, listeners] of this.eventListeners.entries()) {
-			const filteredListeners = listeners.filter((listener) => listener.plugin !== plugin);
-			this.eventListeners.set(eventType, filteredListeners);
-		}
 	}
 }

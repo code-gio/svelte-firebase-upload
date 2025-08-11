@@ -24,15 +24,15 @@ export interface ResumeOptions {
 }
 
 export class UploadResumer {
-	private storageKey = 'upload-resume-state';
-	private chunkSize: number;
-	private verifyChunks: boolean;
-	private parallelChunks: number;
+	private _storageKey = 'upload-resume-state';
+	private _chunkSize: number;
+	private _verifyChunks: boolean;
+	private _parallelChunks: number;
 
 	constructor(options: ResumeOptions = {}) {
-		this.chunkSize = options.chunkSize || 1024 * 1024; // 1MB chunks
-		this.verifyChunks = options.verifyChunks || true;
-		this.parallelChunks = options.parallelChunks || 3;
+		this._chunkSize = options.chunkSize || 1024 * 1024; // 1MB chunks
+		this._verifyChunks = options.verifyChunks || true;
+		this._parallelChunks = options.parallelChunks || 3;
 	}
 
 	// Create resumable upload state
@@ -115,7 +115,7 @@ export class UploadResumer {
 			const chunkBlob = file.slice(chunk.start, chunk.end);
 
 			// Calculate chunk hash if verification is enabled
-			if (this.verifyChunks) {
+			if (this._verifyChunks) {
 				chunk.hash = await this.calculateChunkHash(chunkBlob);
 			}
 
@@ -162,7 +162,7 @@ export class UploadResumer {
 		};
 
 		// Process chunks in parallel with concurrency limit
-		const chunkGroups = this.chunkArray(chunks, this.parallelChunks);
+		const chunkGroups = this.chunkArray(chunks, this._parallelChunks);
 
 		for (const chunkGroup of chunkGroups) {
 			const promises = chunkGroup.map((chunk) =>
@@ -229,7 +229,7 @@ export class UploadResumer {
 	// Get all upload states
 	async getAllUploadStates(): Promise<ResumableUploadState[]> {
 		try {
-			const stored = localStorage.getItem(this.storageKey);
+			const stored = localStorage.getItem(this._storageKey);
 			return stored ? JSON.parse(stored) : [];
 		} catch (error) {
 			console.error('[UploadResumer] Error retrieving upload states from storage:', error);
@@ -242,8 +242,8 @@ export class UploadResumer {
 		const chunks: ChunkState[] = [];
 		let index = 0;
 
-		for (let start = 0; start < fileSize; start += this.chunkSize) {
-			const end = Math.min(start + this.chunkSize, fileSize);
+		for (let start = 0; start < fileSize; start += this._chunkSize) {
+			const end = Math.min(start + this._chunkSize, fileSize);
 			chunks.push({
 				index: index++,
 				start,
@@ -286,7 +286,7 @@ export class UploadResumer {
 		}
 
 		try {
-			localStorage.setItem(this.storageKey, JSON.stringify(states));
+			localStorage.setItem(this._storageKey, JSON.stringify(states));
 		} catch (error) {
 			console.error('[UploadResumer] Error saving upload state to storage:', error);
 			throw error;
@@ -298,7 +298,7 @@ export class UploadResumer {
 		const states = await this.getAllUploadStates();
 		const filteredStates = states.filter((s) => s.fileId !== fileId);
 		try {
-			localStorage.setItem(this.storageKey, JSON.stringify(filteredStates));
+			localStorage.setItem(this._storageKey, JSON.stringify(filteredStates));
 		} catch (error) {
 			console.error('[UploadResumer] Error removing upload state from storage:', error);
 			throw error;

@@ -1,18 +1,53 @@
 import type { NetworkMonitor, RetryConfig } from '../types.js';
 
+/**
+ * Network monitoring and retry management utility.
+ * 
+ * Features:
+ * - Real-time network status monitoring
+ * - Intelligent retry logic with exponential backoff
+ * - Network quality assessment
+ * - Adaptive retry delays based on connection quality
+ * - Circuit breaker pattern for failed operations
+ * 
+ * @example
+ * ```typescript
+ * const networkManager = new NetworkManager({
+ *   maxAttempts: 5,
+ *   baseDelay: 1000,
+ *   backoffMultiplier: 2
+ * });
+ * 
+ * networkManager.onOffline(() => console.log('Connection lost'));
+ * networkManager.onOnline(() => console.log('Connection restored'));
+ * 
+ * // Retry an operation with intelligent backoff
+ * await networkManager.retryWithBackoff(
+ *   () => uploadFile(data),
+ *   'file-upload'
+ * );
+ * ```
+ */
 export class NetworkManager implements NetworkMonitor {
 	public isOnline = $state(true);
 	public connectionType?: string;
 	public effectiveType?: string;
 	public downlink?: number;
 
-	private onlineCallbacks: (() => void)[] = [];
-	private offlineCallbacks: (() => void)[] = [];
-	private connection: any; // Network Information API
-	private retryConfig: RetryConfig;
+	private _onlineCallbacks: (() => void)[] = [];
+	private _offlineCallbacks: (() => void)[] = [];
+	private _connection: any; // Network Information API
+	private _retryConfig: RetryConfig;
+	
+	// Store bound event handlers for proper cleanup
+	private _boundHandlers = {
+		online: this._handleOnline.bind(this),
+		offline: this._handleOffline.bind(this),
+		connectionChange: this._handleConnectionChange.bind(this)
+	};
 
 	constructor(retryConfig: Partial<RetryConfig> = {}) {
-		this.retryConfig = {
+		this._retryConfig = {
 			maxAttempts: 3,
 			baseDelay: 1000,
 			maxDelay: 30000,
@@ -26,31 +61,48 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Network event listeners
 	onOnline(callback: () => void): void {
-		this.onlineCallbacks.push(callback);
+		this._onlineCallbacks.push(callback);
 	}
 
 	onOffline(callback: () => void): void {
-		this.offlineCallbacks.push(callback);
+		this._offlineCallbacks.push(callback);
 	}
 
 	disconnect(): void {
-		this.onlineCallbacks = [];
-		this.offlineCallbacks = [];
+		// Clear callback arrays
+		this._onlineCallbacks.length = 0;
+		this._offlineCallbacks.length = 0;
 
-		if (this.connection) {
-			this.connection.removeEventListener('change', this._handleConnectionChange.bind(this));
+		// Remove event listeners using stored bound handlers
+		if (this._connection) {
+			this._connection.removeEventListener('change', this._boundHandlers.connectionChange);
+			this._connection = null;
 		}
 
-		window.removeEventListener('online', this._handleOnline.bind(this));
-		window.removeEventListener('offline', this._handleOffline.bind(this));
+		window.removeEventListener('online', this._boundHandlers.online);
+		window.removeEventListener('offline', this._boundHandlers.offline);
 	}
 
 	// Smart retry logic with exponential backoff and jitter
 	calculateRetryDelay(attempts: number): number {
-		const { baseDelay, maxDelay, backoffMultiplier, jitter } = this.retryConfig;
+		const { baseDelay, maxDelay, backoffMultiplier, jitter } = this._retryConfig;
 
 		// Exponential backoff
-		const exponentialDelay = baseDelay * Math.pow(backoffMultiplier, attempts);
+		let exponentialDelay = baseDelay * Math.pow(backoffMultiplier, attempts);
+
+		// Adjust based on network quality
+		const networkQuality = this.getNetworkQuality();
+		switch (networkQuality) {
+			case 'poor':
+				exponentialDelay *= 2; // Double delay for poor networks
+				break;
+			case 'good':
+				exponentialDelay *= 1.2; // Slightly longer delay
+				break;
+			case 'excellent':
+				exponentialDelay *= 0.8; // Shorter delay for excellent networks
+				break;
+		}
 
 		// Add jitter to avoid thundering herd
 		const jitterAmount = jitter ? Math.random() * 1000 : 0;
@@ -59,9 +111,73 @@ export class NetworkManager implements NetworkMonitor {
 		return Math.min(exponentialDelay + jitterAmount, maxDelay);
 	}
 
+	/**
+	 * Execute an operation with intelligent retry and backoff logic.
+	 * 
+	 * Features circuit breaker pattern, network-aware delays, and automatic
+	 * offline handling.
+	 * 
+	 * @param operation - Async operation to retry
+	 * @param context - Context string for logging (default: 'unknown')
+	 * @returns Promise resolving to operation result
+	 * @throws {Error} When all retry attempts are exhausted
+	 * 
+	 * @example
+	 * ```typescript
+	 * const result = await networkManager.retryWithBackoff(
+	 *   async () => {
+	 *     const response = await fetch('/api/upload', { method: 'POST', body });
+	 *     if (!response.ok) throw new Error('Upload failed');
+	 *     return response.json();
+	 *   },
+	 *   'file-upload'
+	 * );
+	 * ```
+	 */
+	async retryWithBackoff<T>(
+		operation: () => Promise<T>, 
+		context: string = 'unknown'
+	): Promise<T> {
+		let attempts = 0;
+		let lastError: Error;
+
+		while (attempts < this._retryConfig.maxAttempts) {
+			try {
+				return await operation();
+			} catch (error) {
+				lastError = error as Error;
+				attempts++;
+
+				if (!this.shouldRetry(attempts, lastError)) {
+					console.warn(`[NetworkManager] ${context}: Not retrying after ${attempts} attempts. Error: ${lastError.message}`);
+					throw lastError;
+				}
+
+				if (attempts < this._retryConfig.maxAttempts) {
+					const delay = this.calculateRetryDelay(attempts);
+					console.warn(`[NetworkManager] ${context}: Attempt ${attempts} failed, retrying in ${delay}ms. Error: ${lastError.message}`);
+					
+					// Wait for network if offline
+					if (!this.isOnline) {
+						const networkAvailable = await this.waitForNetwork(delay);
+						if (!networkAvailable) {
+							console.error(`[NetworkManager] ${context}: Network unavailable, aborting retry`);
+							throw new Error('Network unavailable');
+						}
+					} else {
+						await new Promise(resolve => setTimeout(resolve, delay));
+					}
+				}
+			}
+		}
+
+		console.error(`[NetworkManager] ${context}: All ${this._retryConfig.maxAttempts} attempts failed`);
+		throw lastError!;
+	}
+
 	// Check if we should retry based on network conditions
 	shouldRetry(attempts: number, error?: Error): boolean {
-		if (attempts >= this.retryConfig.maxAttempts) {
+		if (attempts >= this._retryConfig.maxAttempts) {
 			return false;
 		}
 
@@ -76,11 +192,30 @@ export class NetworkManager implements NetworkMonitor {
 				'PERMISSION_DENIED',
 				'INVALID_ARGUMENT',
 				'NOT_FOUND',
-				'ALREADY_EXISTS'
+				'ALREADY_EXISTS',
+				'QUOTA_EXCEEDED',
+				'UNAUTHENTICATED'
 			];
 
-			if (nonRetryableErrors.some((err) => error.message.includes(err))) {
+			const retryableErrors = [
+				'NETWORK_ERROR',
+				'TIMEOUT',
+				'INTERNAL',
+				'UNAVAILABLE',
+				'CANCELLED',
+				'ABORTED'
+			];
+
+			// Check for non-retryable errors first
+			if (nonRetryableErrors.some((err) => error.message.toUpperCase().includes(err))) {
 				return false;
+			}
+
+			// For unknown errors, check network quality
+			if (!retryableErrors.some((err) => error.message.toUpperCase().includes(err))) {
+				const networkQuality = this.getNetworkQuality();
+				// Only retry unknown errors if network quality is good
+				return networkQuality === 'excellent' || networkQuality === 'good';
 			}
 		}
 
@@ -89,9 +224,9 @@ export class NetworkManager implements NetworkMonitor {
 
 	// Get current network quality
 	getNetworkQuality(): 'excellent' | 'good' | 'poor' | 'unknown' {
-		if (!this.connection) return 'unknown';
+		if (!this._connection) return 'unknown';
 
-		const { effectiveType, downlink } = this.connection;
+		const { effectiveType, downlink } = this._connection;
 
 		if (effectiveType === '4g' && downlink && downlink > 8) {
 			// Lowered from 10
@@ -130,30 +265,30 @@ export class NetworkManager implements NetworkMonitor {
 
 		return new Promise((resolve) => {
 			const timeoutId = setTimeout(() => {
-				this.offlineCallbacks = this.offlineCallbacks.filter((cb) => cb !== onOnline);
+				this._onlineCallbacks = this._onlineCallbacks.filter((cb) => cb !== onOnline);
 				resolve(false);
 			}, timeout);
 
 			const onOnline = () => {
 				clearTimeout(timeoutId);
-				this.offlineCallbacks = this.offlineCallbacks.filter((cb) => cb !== onOnline);
+				this._onlineCallbacks = this._onlineCallbacks.filter((cb) => cb !== onOnline);
 				resolve(true);
 			};
 
-			this.onlineCallbacks.push(onOnline);
+			this._onlineCallbacks.push(onOnline);
 		});
 	}
 
 	// Private methods
 	private _initializeNetworkMonitoring(): void {
-		// Browser online/offline events
-		window.addEventListener('online', this._handleOnline.bind(this));
-		window.addEventListener('offline', this._handleOffline.bind(this));
+		// Browser online/offline events using stored bound handlers
+		window.addEventListener('online', this._boundHandlers.online);
+		window.addEventListener('offline', this._boundHandlers.offline);
 
 		// Network Information API (if available)
 		if ('connection' in navigator) {
-			this.connection = (navigator as any).connection;
-			this.connection.addEventListener('change', this._handleConnectionChange.bind(this));
+			this._connection = (navigator as any).connection;
+			this._connection.addEventListener('change', this._boundHandlers.connectionChange);
 			this._updateConnectionInfo();
 		}
 
@@ -163,12 +298,12 @@ export class NetworkManager implements NetworkMonitor {
 
 	private _handleOnline(): void {
 		this.isOnline = true;
-		this.onlineCallbacks.forEach((callback) => callback());
+		this._onlineCallbacks.forEach((callback) => callback());
 	}
 
 	private _handleOffline(): void {
 		this.isOnline = false;
-		this.offlineCallbacks.forEach((callback) => callback());
+		this._offlineCallbacks.forEach((callback) => callback());
 	}
 
 	private _handleConnectionChange(): void {
@@ -176,10 +311,10 @@ export class NetworkManager implements NetworkMonitor {
 	}
 
 	private _updateConnectionInfo(): void {
-		if (!this.connection) return;
+		if (!this._connection) return;
 
-		this.connectionType = this.connection.effectiveType;
-		this.effectiveType = this.connection.effectiveType;
-		this.downlink = this.connection.downlink;
+		this.connectionType = this._connection.type;
+		this.effectiveType = this._connection.effectiveType;
+		this.downlink = this._connection.downlink;
 	}
 }

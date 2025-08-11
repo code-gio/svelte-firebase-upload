@@ -7,13 +7,51 @@ export class MemoryManager {
 	private db: IDBDatabase | null = null;
 	private pendingTotalFiles: number = 0;
 	private pendingTotalSize: number = 0;
+	private dbInitializationAttempts: number = 0;
+	private readonly maxDbInitAttempts: number = 3;
+	private dbInitializationPromise: Promise<void> | null = null;
 
 	constructor(config: Partial<VirtualQueueConfig> = {}) {
-		this.config = {
+		// Validate and sanitize configuration
+		this.config = this._validateConfig({
 			maxMemoryItems: 1000,
 			batchSize: 100,
 			...config
-		};
+		});
+
+		// Initialize persistence if enabled
+		if (this.config.persistenceKey) {
+			this._initializePersistenceWithRetry();
+		}
+	}
+
+	private _validateConfig(config: VirtualQueueConfig): VirtualQueueConfig {
+		const warnings: string[] = [];
+		
+		// Validate maxMemoryItems
+		if (typeof config.maxMemoryItems !== 'number' || config.maxMemoryItems < 10) {
+			warnings.push('maxMemoryItems must be at least 10');
+			config.maxMemoryItems = Math.max(10, config.maxMemoryItems || 1000);
+		} else if (config.maxMemoryItems > 100000) {
+			warnings.push('maxMemoryItems exceeds recommended maximum (100000), may cause memory issues');
+			config.maxMemoryItems = 100000;
+		}
+
+		// Validate batchSize
+		if (typeof config.batchSize !== 'number' || config.batchSize < 1) {
+			warnings.push('batchSize must be at least 1');
+			config.batchSize = Math.max(1, config.batchSize || 100);
+		} else if (config.batchSize > config.maxMemoryItems) {
+			warnings.push('batchSize cannot exceed maxMemoryItems');
+			config.batchSize = Math.min(config.batchSize, config.maxMemoryItems);
+		}
+
+		// Log warnings
+		if (warnings.length > 0) {
+			console.warn('[MemoryManager] Configuration warnings:', warnings);
+		}
+
+		return config;
 	}
 
 	// Add files in batches to avoid memory spikes
@@ -38,11 +76,7 @@ export class MemoryManager {
 
 			// Store in IndexedDB if persistence is enabled
 			if (this.config.persistenceKey) {
-				try {
-					await this._persistBatch(fileBatch);
-				} catch (err) {
-					console.error(`[MemoryManager] Error persisting batch ${batchId}:`, err);
-				}
+				await this._persistBatchWithRetry(fileBatch);
 			}
 		}
 
@@ -159,14 +193,48 @@ export class MemoryManager {
 		return this.pendingTotalSize;
 	}
 
-	// IndexedDB Persistence
+	// IndexedDB Persistence with enhanced error recovery
 	async initializePersistence(): Promise<void> {
 		if (!this.config.persistenceKey) return;
 
 		try {
 			this.db = await this._openDatabase();
+			this.dbInitializationAttempts = 0; // Reset attempts on success
 		} catch (error) {
 			console.warn('Failed to initialize IndexedDB persistence:', error);
+			throw error; // Re-throw for retry mechanism
+		}
+	}
+
+	// Initialize persistence with retry mechanism
+	private async _initializePersistenceWithRetry(): Promise<void> {
+		if (this.dbInitializationPromise) {
+			return this.dbInitializationPromise;
+		}
+
+		this.dbInitializationPromise = this._attemptInitialization();
+		return this.dbInitializationPromise;
+	}
+
+	private async _attemptInitialization(): Promise<void> {
+		while (this.dbInitializationAttempts < this.maxDbInitAttempts) {
+			try {
+				await this.initializePersistence();
+				return; // Success
+			} catch (error) {
+				this.dbInitializationAttempts++;
+				console.warn(`[MemoryManager] DB initialization attempt ${this.dbInitializationAttempts} failed:`, error);
+				
+				if (this.dbInitializationAttempts >= this.maxDbInitAttempts) {
+					console.error(`[MemoryManager] Failed to initialize DB after ${this.maxDbInitAttempts} attempts. Persistence disabled.`);
+					this.config.persistenceKey = undefined; // Disable persistence
+					return;
+				}
+
+				// Exponential backoff
+				const delay = Math.min(1000 * Math.pow(2, this.dbInitializationAttempts - 1), 10000);
+				await new Promise(resolve => setTimeout(resolve, delay));
+			}
 		}
 	}
 
@@ -242,6 +310,48 @@ export class MemoryManager {
 			await store.put(batch);
 		} catch (error) {
 			console.warn('Failed to persist batch:', error);
+			throw error;
+		}
+	}
+
+	// Persist batch with retry mechanism
+	private async _persistBatchWithRetry(batch: FileBatch, maxAttempts: number = 3): Promise<void> {
+		// Ensure DB is initialized
+		if (this.config.persistenceKey && !this.db) {
+			await this._initializePersistenceWithRetry();
+		}
+
+		if (!this.db || !this.config.persistenceKey) {
+			return; // Persistence disabled or failed
+		}
+
+		let attempts = 0;
+		while (attempts < maxAttempts) {
+			try {
+				await this._persistBatch(batch);
+				return; // Success
+			} catch (error) {
+				attempts++;
+				console.warn(`[MemoryManager] Batch persistence attempt ${attempts} failed:`, error);
+				
+				if (attempts >= maxAttempts) {
+					console.error(`[MemoryManager] Failed to persist batch ${batch.id} after ${maxAttempts} attempts`);
+					return; // Give up but don't crash
+				}
+
+				// Exponential backoff for retries
+				const delay = Math.min(200 * Math.pow(2, attempts - 1), 2000);
+				await new Promise(resolve => setTimeout(resolve, delay));
+
+				// Try to reinitialize DB connection if it seems broken
+				if (attempts === maxAttempts - 1 && this.config.persistenceKey) {
+					try {
+						this.db = await this._openDatabase();
+					} catch (reinitError) {
+						console.warn('[MemoryManager] Failed to reinitialize DB:', reinitError);
+					}
+				}
+			}
 		}
 	}
 }
